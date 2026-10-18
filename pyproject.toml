@@ -1,0 +1,68 @@
+[project]
+name = "simcc-etl"
+version = "0.1.0"
+description = "Pipeline de ETL desacoplado do SIMCC"
+authors = [
+    {name = "meirelesgc", email = "geu_costa@outlook.com"}
+]
+readme = "README.md"
+requires-python = ">=3.12,<4.0"
+dependencies = [
+    "fastapi[standard]>=0.115.0,<1.0.0",
+    "pydantic-settings>=2.6.0,<3.0.0",
+    "sqlalchemy>=2.0.36,<3.0.0",
+    "psycopg[binary]>=3.2.0,<4.0.0",
+    "alembic>=1.14.0,<2.0.0",
+    "structlog>=24.4.0,<26.0.0",
+    "httpx>=0.28.0,<1.0.0",
+    "polars>=1.15.0,<2.0.0",
+    "docker>=7.1.0,<8.0.0",
+    "redis>=5.2.0,<6.0.0",
+    "zeep>=4.3.0,<5.0.0",
+    "beautifulsoup4>=4.12.3,<5.0.0",
+]
+
+[tool.poetry]
+packages = [{ include = "simcc_etl" }]
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3.0"
+pytest-cov = "^6.0.0"
+pytest-asyncio = "^0.24.0"
+taskipy = "^1.14.0"
+ruff = "^0.8.0"
+testcontainers = { extras = ["postgres", "redis"], version = "^4.8.0" }
+respx = "^0.21.1"
+
+[tool.ruff]
+line-length = 79
+extend-exclude = ['migrations']
+
+[tool.ruff.lint]
+preview = true
+select = ['I', 'F', 'E', 'W', 'PL', 'PT']
+
+[tool.ruff.format]
+preview = true
+quote-style = 'single'
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+addopts = '-p no:warnings'
+markers = [
+    "unit: testes unitários rápidos sem banco",
+    "integration: testes de integração com Postgres/Redis",
+]
+
+[tool.taskipy.tasks]
+lint = 'ruff check'
+pre_format = 'ruff check --fix'
+format = 'ruff format'
+run = 'fastapi dev simcc_etl/app.py'
+pre_test = 'task lint'
+test = 'pytest -s -x --cov=simcc_etl -vv'
+post_test = 'coverage html'
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
