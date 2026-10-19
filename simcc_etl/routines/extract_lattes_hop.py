@@ -61,7 +61,8 @@ def _run_hop_workflow(
 
             # Detecta erros críticos no log do Hop
             if (
-                'ERROR' in line
+                ' - ERROR' in line
+                or line.startswith('ERROR')
                 or 'Workflow execution failed' in line
                 or 'result=[false]' in line
             ):
