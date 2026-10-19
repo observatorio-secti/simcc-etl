@@ -29,6 +29,7 @@ from simcc_etl.routines import (
     extract_lattes_hop,
     import_capes_programs,
     import_program_research_lines,
+    publish_to_read_db,
     resolve_cnpq_lattes_id,
     sanitize_lattes_data,
     soap_lattes,
@@ -70,6 +71,8 @@ ROUTINES: dict[str, Callable[..., Stats]] = {
     'import_program_research_lines': import_program_research_lines.run,
     'export_oda_research_groups': export_oda_research_groups.run,
     'classify_article_themes': classify_article_themes.run,
+    'publish_to_read_db': publish_to_read_db.run,
+    'refresh_search_views': publish_to_read_db.run,
 }
 
 
