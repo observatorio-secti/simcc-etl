@@ -19,16 +19,18 @@ def upgrade() -> None:
     op.create_table(
         'etl_runs',
         sa.Column('id', sa.UUID(), nullable=False),
-        sa.Column('routine_name', sa.String(length=100), nullable=False),
-        sa.Column('status', sa.String(length=20), nullable=False),
+        sa.Column('status', sa.String(length=20), nullable=False, server_default='PENDING'),
         sa.Column('started_at', sa.DateTime(timezone=True), nullable=False),
-        sa.Column('finished_at', sa.DateTime(timezone=True), nullable=True),
-        sa.Column('items_found', sa.Integer(), nullable=False),
-        sa.Column('items_succeeded', sa.Integer(), nullable=False),
-        sa.Column('items_failed', sa.Integer(), nullable=False),
+        sa.Column('ended_at', sa.DateTime(timezone=True), nullable=True),
+        sa.Column('triggered_by', sa.String(length=255), nullable=False, server_default='system'),
+        sa.Column('current_routine', sa.String(length=100), nullable=True),
+        sa.Column('routines', sa.JSON(), nullable=False, server_default='[]'),
+        sa.Column('lattes_ids', sa.JSON(), nullable=True),
+        sa.Column('steps', sa.JSON(), nullable=False, server_default='{}'),
         sa.Column('error_message', sa.Text(), nullable=True),
         sa.PrimaryKeyConstraint('id'),
     )
+    op.create_index(op.f('ix_etl_runs_status'), 'etl_runs', ['status'], unique=False)
     op.create_table(
         'research_group_ind_prod',
         sa.Column('research_group_id', sa.UUID(), nullable=False),
