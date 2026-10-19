@@ -20,6 +20,7 @@ from simcc_etl.core.logging import (
 )
 from simcc_etl.routines import (
     aggregate_researcher_production,
+    calculate_production_index,
     extract_lattes_hop,
     import_capes_programs,
     sanitize_lattes_data,
@@ -44,6 +45,17 @@ ROUTINES: dict[str, Callable[..., Stats]] = {
     'hop_index': extract_lattes_hop.run_index,
     'sanitize_lattes_data': sanitize_lattes_data.run,
     'aggregate_researcher_production': aggregate_researcher_production.run,
+    'calculate_researcher_indprod': (
+        calculate_production_index.run_researcher_indprod
+    ),
+    'calculate_graduate_program_indprod': (
+        calculate_production_index.run_graduate_program_indprod
+    ),
+    'calculate_research_group_indprod': (
+        calculate_production_index.run_research_group_indprod
+    ),
+    'calculate_production_index': calculate_production_index.run_all,
+    'indprod': calculate_production_index.run_all,
 }
 
 
