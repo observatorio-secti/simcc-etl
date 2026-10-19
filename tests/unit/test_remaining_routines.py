@@ -94,3 +94,50 @@ def test_import_program_research_lines_empty():
     session.execute.return_value = mock_res
     stats = run_import_lines(session)
     assert stats.failed >= 0
+
+
+def test_run_seed_when_already_seeded():
+    from simcc_etl.routines.extract_lattes_hop import run_seed
+
+    session = MagicMock()
+    session.execute.return_value.scalar.return_value = True
+
+    with patch(
+        'simcc_etl.routines.extract_lattes_hop._run_hop_workflow'
+    ) as mock_hop:
+        stats = run_seed(session)
+        assert stats.found == 0
+        assert stats.succeeded == 0
+        mock_hop.assert_not_called()
+
+
+def test_run_seed_when_not_seeded():
+    from simcc_etl.common import Stats
+    from simcc_etl.routines.extract_lattes_hop import run_seed
+
+    session = MagicMock()
+    session.execute.return_value.scalar.return_value = False
+
+    with patch(
+        'simcc_etl.routines.extract_lattes_hop._run_hop_workflow'
+    ) as mock_hop:
+        mock_hop.return_value = Stats(found=1, succeeded=1, failed=0)
+        stats = run_seed(session)
+        assert stats.succeeded == 1
+        mock_hop.assert_called_once_with('workflows/Seeding.hwf')
+
+
+def test_run_seed_force():
+    from simcc_etl.common import Stats
+    from simcc_etl.routines.extract_lattes_hop import run_seed
+
+    session = MagicMock()
+    session.execute.return_value.scalar.return_value = True
+
+    with patch(
+        'simcc_etl.routines.extract_lattes_hop._run_hop_workflow'
+    ) as mock_hop:
+        mock_hop.return_value = Stats(found=1, succeeded=1, failed=0)
+        stats = run_seed(session, force=True)
+        assert stats.succeeded == 1
+        mock_hop.assert_called_once_with('workflows/Seeding.hwf')

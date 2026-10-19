@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import docker
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from simcc_etl.common import Stats
@@ -88,10 +89,41 @@ def _run_hop_workflow(
             pass
 
 
+def is_database_seeded(session: Session) -> bool:
+    """Verifica se o banco já possui os dados carregados pelo Seed."""
+    try:
+        sql = text('SELECT EXISTS (SELECT 1 FROM country LIMIT 1)')
+        return bool(session.execute(sql).scalar())
+    except Exception as e:
+        logger.warning(
+            f'Falha ao verificar seed no banco: {e}. Prosseguindo com Seed.'
+        )
+        return False
+
+
 def run_seed(
-    session: Session, *, lattes_ids: list[str] | None = None
+    session: Session,
+    *,
+    lattes_ids: list[str] | None = None,
+    force: bool = False,
 ) -> Stats:
-    """Executa o workflow de seed do Apache Hop (Seeding.hwf)."""
+    """Executa o workflow Seeding.hwf do Hop de forma idempotente.
+
+    O workflow Seeding.hwf insere dados (países, estados, JCR, Qualis) usando
+    TableOutput sem truncate e sem cláusula ON CONFLICT. Executá-lo mais de uma
+    vez em um banco já inicializado resulta em erro de chave duplicada
+    (duplicate key value violates unique constraint).
+
+    Se o banco já possuir registros na tabela 'country', a rotina pula a
+    execução e retorna sucesso sem disparar o container Apache Hop.
+    """
+    if not force and is_database_seeded(session):
+        logger.info(
+            'Banco de dados já contém registros de semente '
+            '(países/estados/JCR/Qualis). Pulando execução de Seeding.hwf.'
+        )
+        return Stats(found=0, succeeded=0, failed=0)
+
     return _run_hop_workflow('workflows/Seeding.hwf')
 
 

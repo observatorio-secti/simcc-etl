@@ -80,6 +80,26 @@ def register_routine(name: str, fn: Callable[..., Stats]) -> None:
     ROUTINES[name] = fn
 
 
+DEFAULT_ROUTINES: list[str] = [
+    'import_capes_programs',
+    'import_capes_ratings',
+    'soap_lattes',
+    'hop_index',
+    'sanitize_lattes_data',
+    'aggregate_researcher_production',
+    'calculate_production_index',
+    'classify_researchers',
+    'build_search_dictionary',
+    'resolve_cnpq_lattes_id',
+    'publish_to_read_db',
+]
+
+
+def get_default_routines() -> list[str]:
+    """Retorna a sequência padrão do pipeline diário (exclui setup de seed)."""
+    return list(DEFAULT_ROUTINES)
+
+
 def try_acquire_lock(conn) -> bool:
     """Tenta obter um lock consultivo exclusivo no PostgreSQL."""
     sql = text('SELECT pg_try_advisory_lock(:id)')
@@ -110,7 +130,7 @@ def run_pipeline(  # noqa: C901, PLR0912, PLR0915
     run_id_str = str(effective_run_id)
     run_id_ctx.set(run_id_str)
 
-    target_routines = routines or get_available_routines()
+    target_routines = routines or get_default_routines()
 
     # 1. Abre conexão dedicada para manter o lock durante toda a execução
     lock_conn = engine.connect()

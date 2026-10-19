@@ -6,6 +6,7 @@ from simcc_etl.pipeline import (
     AlreadyRunningError,
     Stats,
     get_available_routines,
+    get_default_routines,
     register_routine,
     release_lock,
     try_acquire_lock,
@@ -25,6 +26,14 @@ def test_register_and_get_routines():
 
     register_routine('dummy_routine', dummy_fn)
     assert 'dummy_routine' in get_available_routines()
+
+
+def test_default_routines_excludes_hop_seed():
+    default_routines = get_default_routines()
+    assert 'hop_seed' not in default_routines
+    assert 'soap_lattes' in default_routines
+    assert 'hop_index' in default_routines
+    assert 'publish_to_read_db' in default_routines
 
 
 def test_try_acquire_lock_mock():
