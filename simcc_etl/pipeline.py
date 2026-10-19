@@ -20,9 +20,16 @@ from simcc_etl.core.logging import (
 )
 from simcc_etl.routines import (
     aggregate_researcher_production,
+    build_search_dictionary,
     calculate_production_index,
+    classify_article_themes,
+    classify_researchers,
+    enrich_from_openalex,
+    export_oda_research_groups,
     extract_lattes_hop,
     import_capes_programs,
+    import_program_research_lines,
+    resolve_cnpq_lattes_id,
     sanitize_lattes_data,
     soap_lattes,
 )
@@ -56,6 +63,13 @@ ROUTINES: dict[str, Callable[..., Stats]] = {
     ),
     'calculate_production_index': calculate_production_index.run_all,
     'indprod': calculate_production_index.run_all,
+    'classify_researchers': classify_researchers.run,
+    'build_search_dictionary': build_search_dictionary.run,
+    'resolve_cnpq_lattes_id': resolve_cnpq_lattes_id.run,
+    'enrich_from_openalex': enrich_from_openalex.run,
+    'import_program_research_lines': import_program_research_lines.run,
+    'export_oda_research_groups': export_oda_research_groups.run,
+    'classify_article_themes': classify_article_themes.run,
 }
 
 
