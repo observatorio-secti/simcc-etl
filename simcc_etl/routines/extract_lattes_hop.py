@@ -27,6 +27,8 @@ def _run_hop_workflow(
             f'DATABASE_URL={settings.HOP_WRITE_JDBC_URL},'
             f'ADMIN_DATABASE_URL={settings.HOP_ADMIN_JDBC_URL}'
         ),
+        'DATABASE_URL': settings.HOP_WRITE_JDBC_URL,
+        'ADMIN_DATABASE_URL': settings.HOP_ADMIN_JDBC_URL,
     }
 
     volumes = {}
