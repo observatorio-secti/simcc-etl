@@ -19,8 +19,10 @@ from simcc_etl.core.logging import (
     run_id_ctx,
 )
 from simcc_etl.routines import (
+    aggregate_researcher_production,
     extract_lattes_hop,
     import_capes_programs,
+    sanitize_lattes_data,
     soap_lattes,
 )
 
@@ -40,6 +42,8 @@ ROUTINES: dict[str, Callable[..., Stats]] = {
     'import_capes_ratings': import_capes_programs.run_ratings,
     'soap_lattes': soap_lattes.run,
     'hop_index': extract_lattes_hop.run_index,
+    'sanitize_lattes_data': sanitize_lattes_data.run,
+    'aggregate_researcher_production': aggregate_researcher_production.run,
 }
 
 
