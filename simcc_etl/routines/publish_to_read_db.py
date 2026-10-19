@@ -28,10 +28,20 @@ SEARCH_MATERIALIZED_VIEWS = [
 
 EXCLUDED_TABLES = {
     'alembic_version',
+    'alembic_version_etl',
     'etl_runs',
 }
 
 REDIS_GENERATION_KEY = 'simcc:v2:search:generation'
+
+
+def _clean_dsn(url: str) -> str:
+    """Converte URL SQLAlchemy em string DSN compatível com psycopg."""
+    if url.startswith('postgresql+psycopg://'):
+        return url.replace('postgresql+psycopg://', 'postgresql://', 1)
+    if url.startswith('postgresql+asyncpg://'):
+        return url.replace('postgresql+asyncpg://', 'postgresql://', 1)
+    return url
 
 
 def _get_copyable_tables(conn: psycopg.Connection) -> list[str]:
@@ -58,7 +68,6 @@ def _copy_table_binary(
         read_conn.cursor() as r_cur,
         write_conn.cursor() as w_cur,
     ):
-        r_cur.execute(f'TRUNCATE TABLE "{table}" CASCADE;')
         copy_out_sql = f'COPY "{table}" TO STDOUT (FORMAT BINARY)'
         copy_in_sql = f'COPY "{table}" FROM STDIN (FORMAT BINARY)'
         with (
@@ -74,19 +83,28 @@ def copy_tables_to_read_db(
     read_dsn: str,
 ) -> int:
     """Copia tabelas via binary COPY do write_db para o read_db."""
-    if write_dsn == read_dsn:
+    clean_write = _clean_dsn(write_dsn)
+    clean_read = _clean_dsn(read_dsn)
+    if clean_write == clean_read:
         logger.info('WRITE_DB and READ_DB are identical; skipping table copy.')
         return 0
 
     with (
-        psycopg.connect(write_dsn) as w_conn,
-        psycopg.connect(read_dsn) as r_conn,
+        psycopg.connect(clean_write) as w_conn,
+        psycopg.connect(clean_read) as r_conn,
     ):
         tables = _get_copyable_tables(w_conn)
         logger.info(f'Found {len(tables)} tables to copy to read_db')
 
         with r_conn.cursor() as cur:
             cur.execute("SET session_replication_role = 'replica';")
+            if tables:
+                truncate_sql = (
+                    'TRUNCATE TABLE '
+                    + ', '.join(f'"{t}"' for t in tables)
+                    + ' CASCADE;'
+                )
+                cur.execute(truncate_sql)
 
         copied = 0
         for table in tables:
@@ -106,7 +124,7 @@ def refresh_materialized_views(read_dsn: str) -> tuple[int, int]:
     succeeded = 0
     failed = 0
 
-    with psycopg.connect(read_dsn, autocommit=True) as conn:
+    with psycopg.connect(_clean_dsn(read_dsn), autocommit=True) as conn:
         with conn.cursor() as cur:
             for mv in SEARCH_MATERIALIZED_VIEWS:
                 try:
