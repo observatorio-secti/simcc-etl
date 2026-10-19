@@ -40,7 +40,8 @@ class Settings(BaseSettings):
     LOG_DIR: Path = Path('logs')
 
     # External APIs
-    ALTERNATIVE_CNPQ_SERVICE: str = 'http://localhost:8000/v1/alternative-cnpq'
+    ALTERNATIVE_CNPQ_SERVICE: bool = True
+    CNPQ_PROXY_URL: str = 'https://simcc.uesc.br/v3/api'
     OPENALEX_API_KEY: str | None = None
 
     @property

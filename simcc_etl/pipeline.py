@@ -1,12 +1,12 @@
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from simcc_etl.common import Stats
 from simcc_etl.core.database import (
     EtlRun,
     create_etl_tables,
@@ -18,6 +18,11 @@ from simcc_etl.core.logging import (
     routine_name_ctx,
     run_id_ctx,
 )
+from simcc_etl.routines import (
+    extract_lattes_hop,
+    import_capes_programs,
+    soap_lattes,
+)
 
 logger = get_logger('simcc_etl.pipeline')
 
@@ -28,15 +33,14 @@ class AlreadyRunningError(Exception):
     """Lançado quando uma tentativa de adquirir o lock concorrente falha."""
 
 
-@dataclass(slots=True)
-class Stats:
-    found: int = 0
-    succeeded: int = 0
-    failed: int = 0
-
-
 # Catálogo de rotinas mapeadas
-ROUTINES: dict[str, Callable[..., Stats]] = {}
+ROUTINES: dict[str, Callable[..., Stats]] = {
+    'hop_seed': extract_lattes_hop.run_seed,
+    'import_capes_programs': import_capes_programs.run_programs,
+    'import_capes_ratings': import_capes_programs.run_ratings,
+    'soap_lattes': soap_lattes.run,
+    'hop_index': extract_lattes_hop.run_index,
+}
 
 
 def register_routine(name: str, fn: Callable[..., Stats]) -> None:
