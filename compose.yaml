@@ -1,0 +1,74 @@
+services:
+  write_db:
+    image: postgres:16-alpine
+    container_name: simcc_write_db
+    environment:
+      POSTGRES_USER: ${WRITE_DB_USER:-simcc}
+      POSTGRES_PASSWORD: ${WRITE_DB_PASSWORD:-simcc}
+      POSTGRES_DB: ${WRITE_DB_NAME:-simcc_write}
+    ports:
+      - "${WRITE_DB_PORT:-5435}:5432"
+    volumes:
+      - write_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${WRITE_DB_USER:-simcc} -d ${WRITE_DB_NAME:-simcc_write}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  read_db:
+    image: postgres:16-alpine
+    container_name: simcc_read_db
+    environment:
+      POSTGRES_USER: ${READ_DB_USER:-simcc}
+      POSTGRES_PASSWORD: ${READ_DB_PASSWORD:-simcc}
+      POSTGRES_DB: ${READ_DB_NAME:-simcc_read}
+    ports:
+      - "${READ_DB_PORT:-5434}:5432"
+    volumes:
+      - read_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${READ_DB_USER:-simcc} -d ${READ_DB_NAME:-simcc_read}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: simcc_redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  simcc_etl:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: simcc_etl_api
+    ports:
+      - "8000:8000"
+    environment:
+      WRITE_DATABASE_URL: postgresql+psycopg://${WRITE_DB_USER:-simcc}:${WRITE_DB_PASSWORD:-simcc}@write_db:5432/${WRITE_DB_NAME:-simcc_write}
+      READ_DATABASE_URL: postgresql+psycopg://${READ_DB_USER:-simcc}:${READ_DB_PASSWORD:-simcc}@read_db:5432/${READ_DB_NAME:-simcc_read}
+      REDIS_URL: redis://redis:6379/0
+      ALTERNATIVE_CNPQ_SERVICE: "True"
+      CNPQ_PROXY_URL: https://simcc.uesc.br/v3/api
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./storage:/app/storage
+      - ./logs:/app/logs
+    depends_on:
+      write_db:
+        condition: service_healthy
+      read_db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  write_db_data:
+  read_db_data:

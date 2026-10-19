@@ -1,19 +1,141 @@
 # SimCC ETL
 
-Serviço de extração, transformação e carga (ETL) desacoplado do SIMCC.
+Serviço de extração, transformação e carga (ETL) desacoplado do ecossistema SIMCC, projetado para execução independente, alta performance, rastreabilidade completa e integração segura com o banco administrativo e de leitura.
 
-## Estrutura do Projeto
+---
 
-- `simcc_etl/`: Código-fonte da aplicação (FastAPI, CLI, rotinas e orquestrador).
-- `simcc_etl/core/`: Configurações, conexões de banco de dados e utilitários.
-- `simcc_etl/routines/`: Módulos de rotinas individuais.
-- `storage/`: Diretório de arquivos de trabalho (XMLs Lattes, CSVs de seed).
-- `logs/`: Logs estruturados das execuções em formato JSONL.
-- `tests/`: Testes unitários e de integração.
+## 🏗 Arquitetura
 
-## Comandos Úteis (via taskipy)
+O `simcc-etl` opera com isolamento de responsabilidades entre escrita e leitura:
 
-- `poetry run task lint`: Executa verificação estática com Ruff.
-- `poetry run task format`: Corrige e formata código com Ruff.
-- `poetry run task test`: Executa suíte de testes com cobertura.
-- `poetry run task run`: Inicia a API REST em modo desenvolvimento.
+```
+[SimCC Admin DB] (Metadados: Instituições, Pesquisadores)
+       │
+       ▼
+[SimCC ETL Pipeline]
+  ├── Pre-Hop: Seeding, Import CAPES, SOAP Lattes (Proxy UESC)
+  ├── Hop Execution: Docker Jade-Extrator (Index.hwf)
+  ├── Post-Hop: SQL Sanitization, Researcher Production, IndProd (Pesquisador / Grupo / PG)
+  └── Enrichments: Classificação, Dicionários, OpenAlex
+       │
+       ▼ (Advisory Lock: pg_try_advisory_lock(9001001))
+[WRITE_DB] (Escrita dedicada / Processamento pesado)
+       │
+       ▼ (psycopg binary COPY + REFRESH MATERIALIZED VIEW + Cache Bump)
+[READ_DB] (Banco somente-leitura consumido pela API pública)
+```
+
+### Principais Características
+
+1. **Lock Concorrente Robusto**: `pg_try_advisory_lock(9001001)` no PostgreSQL evita execuções simultâneas por CLI ou API.
+2. **Logs Estruturados JSONL**: Cada execução possui seu próprio log (`logs/runs/{run_id}.jsonl`) e log diário (`logs/{YYYY-MM-DD}.jsonl`).
+3. **Apache Hop via Docker SDK**: O container `gleidsoncosta/simcc-extrator:latest` roda de forma isolada, montando os volumes do projeto.
+4. **Proxy CNPq Automático**: Utiliza a rota alternativa do proxy (`https://simcc.uesc.br/v3/api`) quando o webservice oficial do CNPq está inacessível.
+5. **Cálculo de IndProd Unificado**: Barema tipado, separação estrita de patentes concedidas/não-concedidas, cálculo para pesquisadores, programas de pós e grupos de pesquisa.
+6. **Publicação Atômica**: `psycopg` binary COPY com `session_replication_role = 'replica'`, atualização das 15 visões materializadas e invalidação de cache via incremento de geração no Redis (`simcc:v2:search:generation`).
+
+---
+
+## 📁 Estrutura de Pastas
+
+```
+simcc-etl/
+├── simcc_etl/
+│   ├── core/
+│   │   ├── database.py       # Engines SQLAlchemy, modelos EtlRun e ResearchGroupIndProd
+│   │   ├── logging.py        # Logs estruturados structlog / jsonl
+│   │   ├── settings.py       # Pydantic Settings
+│   │   └── text.py           # Normalização de texto e caracteres
+│   ├── routines/             # Módulos desacoplados de cada rotina
+│   │   ├── soap_lattes.py
+│   │   ├── extract_lattes_hop.py
+│   │   ├── import_capes_programs.py
+│   │   ├── sanitize_lattes_data.py
+│   │   ├── aggregate_researcher_production.py
+│   │   ├── calculate_production_index.py
+│   │   ├── classify_researchers.py
+│   │   ├── build_search_dictionary.py
+│   │   ├── resolve_cnpq_lattes_id.py
+│   │   ├── enrich_from_openalex.py
+│   │   ├── import_program_research_lines.py
+│   │   ├── export_oda_research_groups.py
+│   │   ├── classify_article_themes.py
+│   │   └── publish_to_read_db.py
+│   ├── app.py                # Aplicação FastAPI
+│   ├── cli.py                # Interface de linha de comando
+│   ├── pipeline.py           # Orquestrador com advisory lock
+│   └── routers.py            # Endpoints REST (/routines, /runs, /logs)
+├── storage/
+│   ├── seed/                 # Arquivos CSV de seed CAPES
+│   ├── xml/                  # Cache de XMLs Lattes
+│   └── openalex/             # Cache de respostas OpenAlex
+├── tests/
+│   ├── unit/
+│   └── integration/
+├── compose.yaml
+├── Dockerfile
+└── pyproject.toml
+```
+
+---
+
+## 🚀 Como Executar
+
+### 1. Pré-requisitos
+- Python 3.12+ (recomendado 3.13)
+- Poetry (`pip install poetry`)
+- Docker & Docker Compose
+
+### 2. Instalação de Dependências
+```bash
+poetry install
+```
+
+### 3. Subir Bancos e Serviços com Docker Compose
+```bash
+docker compose up -d write_db read_db redis
+```
+
+### 4. Execução via CLI
+
+Listar rotinas disponíveis:
+```bash
+poetry run python -m simcc_etl.cli list
+```
+
+Executar uma rotina específica (ex: Seeding do Hop):
+```bash
+poetry run python -m simcc_etl.cli run hop_seed
+```
+
+Executar download de currículos via SOAP Lattes com filtro de pesquisadores:
+```bash
+poetry run python -m simcc_etl.cli run soap_lattes --lattes-ids 1966167015825708 6716225567627323
+```
+
+Executar publicação para o banco de leitura:
+```bash
+poetry run python -m simcc_etl.cli run publish_to_read_db
+```
+
+### 5. Execução via API REST
+
+Iniciar servidor FastAPI:
+```bash
+poetry run task run
+```
+
+Endpoints disponíveis:
+- `GET /routines`: Lista todas as rotinas cadastradas.
+- `POST /runs`: Dispara uma rotina ou pipeline completo (`{"routine_name": "...", "lattes_ids": [...]}`).
+- `GET /runs`: Histórico de execuções com status, contadores e duração.
+- `GET /runs/{run_id}`: Detalhes de uma execução.
+- `GET /runs/{run_id}/logs?offset=0`: Acompanhamento em streaming/polling dos logs estruturados.
+
+---
+
+## 🛠 Tarefas de Desenvolvimento (Taskipy)
+
+- `poetry run task lint`: Executa verificação de código com Ruff.
+- `poetry run task format`: Formata o código respeitando as convenções do projeto.
+- `poetry run task test`: Executa a suíte de testes com cobertura.
