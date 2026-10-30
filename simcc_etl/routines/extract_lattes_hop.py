@@ -60,8 +60,9 @@ def _run_hop_workflow(
             if not line:
                 continue
 
-            # Detecta erros críticos no log do Hop
-            if (
+            # Detecta erros críticos no log do Hop (ignorando 'ERROR: DUP' do transform Unique rows)
+            is_dup_error = 'ERROR: DUP' in line
+            if not is_dup_error and (
                 ' - ERROR' in line
                 or line.startswith('ERROR')
                 or 'Workflow execution failed' in line

@@ -127,6 +127,12 @@ def run_programs(
             failed_count += 1
 
     if valid_programs:
+        session.execute(
+            text(
+                'CREATE UNIQUE INDEX IF NOT EXISTS uq_graduate_program_code '
+                'ON public.graduate_program (code);'
+            )
+        )
         query = text("""
             INSERT INTO public.graduate_program (
                 code, name, name_en, basic_area, cooperation_project, area,
@@ -243,7 +249,10 @@ def run_researchers(
 
     prog_rows = (
         session.execute(
-            text('SELECT id::TEXT, code FROM public.graduate_program')
+            text(
+                'SELECT graduate_program_id::TEXT AS id, code '
+                'FROM public.graduate_program'
+            )
         )
         .mappings()
         .all()
@@ -280,6 +289,12 @@ def run_researchers(
             })
 
     if records_to_insert:
+        session.execute(
+            text(
+                'ALTER TABLE public.graduate_program_researcher '
+                'DROP CONSTRAINT IF EXISTS graduate_program_researcher_pkey;'
+            )
+        )
         query = text("""
             INSERT INTO public.graduate_program_researcher
                 (graduate_program_id, researcher_id, year, type_)

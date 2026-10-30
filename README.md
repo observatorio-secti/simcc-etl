@@ -9,11 +9,11 @@ Serviço de extração, transformação e carga (ETL) desacoplado do ecossistema
 O `simcc-etl` opera com isolamento de responsabilidades entre escrita e leitura:
 
 ```
-[SimCC Admin DB] (Metadados: Instituições, Pesquisadores)
-       │
+[SimCC Admin API] (Exportação Parquet via /academic/researchers/export/parquet)
+       │ (HTTP + X-Service-Token)
        ▼
 [SimCC ETL Pipeline]
-  ├── Pre-Hop: Seeding, Import CAPES, SOAP Lattes (Proxy UESC)
+  ├── Pre-Hop: Seeding, Import CAPES, SOAP Lattes (Consome Parquet do Admin + Proxy UESC)
   ├── Hop Execution: Docker Jade-Extrator (Index.hwf)
   ├── Post-Hop: SQL Sanitization, Researcher Production, IndProd (Pesquisador / Grupo / PG)
   └── Enrichments: Classificação, Dicionários, OpenAlex
@@ -33,6 +33,23 @@ O `simcc-etl` opera com isolamento de responsabilidades entre escrita e leitura:
 4. **Proxy CNPq Automático**: Utiliza a rota alternativa do proxy (`https://simcc.uesc.br/v3/api`) quando o webservice oficial do CNPq está inacessível.
 5. **Cálculo de IndProd Unificado**: Barema tipado, separação estrita de patentes concedidas/não-concedidas, cálculo para pesquisadores, programas de pós e grupos de pesquisa.
 6. **Publicação Atômica**: `psycopg` binary COPY com `session_replication_role = 'replica'`, atualização das 15 visões materializadas e invalidação de cache via incremento de geração no Redis (`simcc:v2:search:generation`).
+
+---
+
+## ⚙️ Configuração (`.env`)
+
+| Variável | Obrigatória | Descrição |
+|---|:---:|---|
+| `WRITE_DATABASE_URL` | Sim | Conexão com o banco de escrita e processamento do ETL (`simcc_write`) |
+| `READ_DATABASE_URL` | Sim | Conexão com o banco de leitura pública (`simcc`) |
+| `ADMIN_DATABASE_URL` | Sim | Conexão com o banco do admin (usada para workflows JDBC do Hop) |
+| `ADMIN_API_URL` | Sim | URL base da API do `simcc-admin` (padrão: `http://localhost:8009` em dev) |
+| `ADMIN_SERVICE_TOKEN` | Sim | Chave de serviço (*M2M*) para autenticação no `simcc-admin` via `X-Service-Token` |
+| `REDIS_URL` | Sim | Conexão Redis para bump de cache geracional |
+| `ETL_API_KEY` | Sim | Chave de autenticação da API REST do ETL (`X-ETL-API-Key`) |
+| `ALTERNATIVE_CNPQ_SERVICE` | Não | Habilita uso do proxy UESC em vez do WSDL oficial do CNPq (padrão: `true`) |
+| `CNPQ_PROXY_URL` | Não | Endpoint do proxy REST do CNPq (`https://simcc.uesc.br/v3/api`) |
+| `SOAP_MAX_WORKERS` | Não | Quantidade máxima de workers em paralelo no download do Lattes (padrão: `16`) |
 
 ---
 

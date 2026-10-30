@@ -49,6 +49,7 @@ ROUTINES: dict[str, Callable[..., Stats]] = {
     'hop_seed': extract_lattes_hop.run_seed,
     'import_capes_programs': import_capes_programs.run_programs,
     'import_capes_ratings': import_capes_programs.run_ratings,
+    'import_capes_researchers': import_capes_programs.run_researchers,
     'soap_lattes': soap_lattes.run,
     'hop_index': extract_lattes_hop.run_index,
     'sanitize_lattes_data': sanitize_lattes_data.run,
@@ -81,10 +82,11 @@ def register_routine(name: str, fn: Callable[..., Stats]) -> None:
 
 
 DEFAULT_ROUTINES: list[str] = [
-    'import_capes_programs',
-    'import_capes_ratings',
     'soap_lattes',
     'hop_index',
+    'import_capes_programs',
+    'import_capes_ratings',
+    'import_capes_researchers',
     'sanitize_lattes_data',
     'aggregate_researcher_production',
     'calculate_production_index',

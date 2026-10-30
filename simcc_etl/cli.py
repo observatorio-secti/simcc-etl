@@ -1,5 +1,7 @@
 import argparse
+import os
 import sys
+from pathlib import Path
 
 from simcc_etl.core.logging import configure_logging
 from simcc_etl.pipeline import (
@@ -10,6 +12,7 @@ from simcc_etl.pipeline import (
 
 
 def main():
+    os.chdir(Path(__file__).resolve().parents[1])
     parser = argparse.ArgumentParser(description='SimCC ETL CLI')
     parser.add_argument(
         '--routines',

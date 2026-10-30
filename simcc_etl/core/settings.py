@@ -12,13 +12,13 @@ class Settings(BaseSettings):
 
     # Database URLs (psycopg v3)
     WRITE_DATABASE_URL: str = (
-        'postgresql+psycopg://postgres:postgres@localhost:5435/simcc_write'
+        'postgresql+psycopg://postgres:postgres@localhost:5432/simcc_write'
     )
     READ_DATABASE_URL: str = (
-        'postgresql+psycopg://postgres:postgres@localhost:5434/simcc'
+        'postgresql+psycopg://postgres:postgres@localhost:5432/simcc'
     )
     ADMIN_DATABASE_URL: str = (
-        'postgresql+psycopg://db_user:db_password@localhost:5433/db'
+        'postgresql+psycopg://db_user:db_password@localhost:5432/db'
     )
 
     # Redis URL
@@ -26,6 +26,11 @@ class Settings(BaseSettings):
 
     # Security
     ETL_API_KEY: str = 'simcc-etl-secret-key'
+    ADMIN_SERVICE_TOKEN: str = ''
+    ADMIN_API_URL: str = 'http://localhost:8009'
+
+    # Concurrency / Performance
+    SOAP_MAX_WORKERS: int = 16
 
     # Apache Hop Configuration
     HOP_IMAGE: str = 'gleidsoncosta/simcc-extrator:latest'

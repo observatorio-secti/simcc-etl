@@ -98,6 +98,14 @@ def copy_tables_to_read_db(
 
         with r_conn.cursor() as cur:
             cur.execute("SET session_replication_role = 'replica';")
+            cur.execute(
+                'ALTER TABLE public.graduate_program_researcher '
+                'DROP CONSTRAINT IF EXISTS graduate_program_researcher_pkey;'
+            )
+            cur.execute(
+                'CREATE UNIQUE INDEX IF NOT EXISTS uq_graduate_program_code '
+                'ON public.graduate_program (code);'
+            )
             if tables:
                 truncate_sql = (
                     'TRUNCATE TABLE '
