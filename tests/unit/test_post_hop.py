@@ -43,11 +43,6 @@ def test_sync_admin_data_full():
     # 2. academic.collections
     # 3. academic.researcher_institutions
     # 4. academic.researcher_collections
-    m_res = MagicMock()
-    m_res.mappings.return_value.all.return_value = [
-        {'id': 'res-uuid-1', 'name': 'Pesquisador Teste', 'lattes_id': '1111222233334444'}
-    ]
-
     m_inst = MagicMock()
     m_inst.mappings.return_value.all.return_value = [
         {'name': 'Universidade Estadual de Santa Cruz', 'acronym': 'UESC'}
@@ -81,7 +76,7 @@ def test_sync_admin_data_full():
         }
     ]
 
-    admin_conn.execute.side_effect = [m_res, m_inst, m_col, m_ri, m_rc]
+    admin_conn.execute.side_effect = [m_inst, m_col, m_ri, m_rc]
 
     write_session = MagicMock()
     m_existing_inst = MagicMock()
@@ -91,7 +86,7 @@ def test_sync_admin_data_full():
     sync_admin_data(write_session, admin_engine=admin_engine)
 
     # Verifica que realizou commits das etapas de sincronização
-    assert write_session.commit.call_count >= 4
+    assert write_session.commit.call_count >= 3
 
 
 def test_aggregate_researcher_production_all():

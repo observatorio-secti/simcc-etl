@@ -168,18 +168,6 @@ def sync_admin_data(
     )
 
     with admin_engine.connect() as admin_conn:
-        admin_researchers = (
-            admin_conn.execute(
-                text(
-                    'SELECT id, name, lattes_id '
-                    'FROM academic.researchers '
-                    'WHERE lattes_id IS NOT NULL'
-                )
-            )
-            .mappings()
-            .all()
-        )
-
         admin_institutions = (
             admin_conn.execute(
                 text(
@@ -231,26 +219,7 @@ def sync_admin_data(
             .all()
         )
 
-    # a0) Garantir pesquisadores do admin_db em public.researcher
-    logger.info(
-        f'Sincronizando {len(admin_researchers)} pesquisadores do admin_db para write_db'
-    )
     batch_size = 5000
-    for i in range(0, len(admin_researchers), batch_size):
-        chunk = admin_researchers[i : i + batch_size]
-        write_session.execute(
-            text(
-                """
-                INSERT INTO public.researcher (
-                    id, name, lattes_id, last_update, has_image, status, stars
-                )
-                VALUES (:id, :name, :lattes_id, now(), false, true, 0)
-                ON CONFLICT (lattes_id) DO NOTHING;
-                """
-            ),
-            chunk,
-        )
-    write_session.commit()
 
     # a) Garantir instituições em public.institution (por acronym ou name)
     existing_insts = (
