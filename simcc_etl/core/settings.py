@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     ALTERNATIVE_CNPQ_SERVICE: bool = True
     CNPQ_PROXY_URL: str = 'https://simcc.uesc.br/v3/api'
     OPENALEX_API_KEY: str | None = None
+    OPENALEX_BATCH_COMMIT_SIZE: int = 50
 
     @property
     def xml_current_path(self) -> Path:
