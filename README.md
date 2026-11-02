@@ -33,6 +33,7 @@ O `simcc-etl` opera com isolamento de responsabilidades entre escrita e leitura:
 4. **Proxy CNPq Automático**: Utiliza a rota alternativa do proxy (`https://simcc.uesc.br/v3/api`) quando o webservice oficial do CNPq está inacessível.
 5. **Cálculo de IndProd Unificado**: Barema tipado, separação estrita de patentes concedidas/não-concedidas, cálculo para pesquisadores, programas de pós e grupos de pesquisa.
 6. **Publicação Atômica**: `psycopg` binary COPY com `session_replication_role = 'replica'`, atualização das 15 visões materializadas e invalidação de cache via incremento de geração no Redis (`simcc:v2:search:generation`).
+7. **Enriquecimento Incremental com OpenAlex**: Commit em lotes a cada 50 registros de sucesso com cache local em disco (`storage/openalex/`), viabilizando interrupção e retomada resiliente sem perda de progresso.
 
 ---
 
@@ -50,6 +51,8 @@ O `simcc-etl` opera com isolamento de responsabilidades entre escrita e leitura:
 | `ALTERNATIVE_CNPQ_SERVICE` | Não | Habilita uso do proxy UESC em vez do WSDL oficial do CNPq (padrão: `true`) |
 | `CNPQ_PROXY_URL` | Não | Endpoint do proxy REST do CNPq (`https://simcc.uesc.br/v3/api`) |
 | `SOAP_MAX_WORKERS` | Não | Quantidade máxima de workers em paralelo no download do Lattes (padrão: `16`) |
+| `OPENALEX_API_KEY` | Não | Chave de autenticação da API OpenAlex para limites de taxa ampliados |
+| `OPENALEX_BATCH_COMMIT_SIZE` | Não | Tamanho do lote de registros com sucesso para commit no banco na rotina OpenAlex (padrão: `50`) |
 
 ---
 
