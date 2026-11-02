@@ -11,3 +11,4 @@ def test_settings_defaults():
     assert settings.xml_current_path == Path('storage/xml/current')
     assert settings.xml_run_path == Path('storage/xml/run_current')
     assert settings.SOAP_MAX_WORKERS == 16
+    assert settings.OPENALEX_BATCH_COMMIT_SIZE == 50
