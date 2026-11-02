@@ -2,9 +2,11 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 
 from simcc_etl.core.database import create_etl_tables
 from simcc_etl.core.logging import configure_logging
+from simcc_etl.dashboard import dashboard_router
 from simcc_etl.routers import router
 
 
@@ -33,7 +35,13 @@ app.add_middleware(
     allow_headers=['*'],
 )
 
+app.include_router(dashboard_router)
 app.include_router(router)
+
+
+@app.get('/', include_in_schema=False)
+def root_redirect():
+    return RedirectResponse(url='/dashboard')
 
 
 @app.get('/health', tags=['Health'])

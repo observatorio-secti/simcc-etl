@@ -143,11 +143,19 @@ poetry run task run
 ```
 
 Endpoints disponíveis:
+- `GET /dashboard` (ou `/`): Interface web interativa para monitorar execuções em tempo real, etapas e logs estruturados.
 - `GET /routines`: Lista todas as rotinas cadastradas.
 - `POST /runs`: Dispara uma rotina ou pipeline completo (`{"routine_name": "...", "lattes_ids": [...]}`).
 - `GET /runs`: Histórico de execuções com status, contadores e duração.
 - `GET /runs/{run_id}`: Detalhes de uma execução.
 - `GET /runs/{run_id}/logs?offset=0`: Acompanhamento em streaming/polling dos logs estruturados.
+
+### 6. Monitoramento Visual via Dashboard
+
+O serviço inclui uma interface web integrada para acompanhamento ao vivo das rotinas e histórico de logs:
+- Acesse `http://localhost:8001/dashboard` (ou `http://localhost:8001/` que redireciona automaticamente).
+- Exibe o status da execução atual (`RUNNING`, `SUCCEEDED`, `FAILED`), a rotina em andamento, o tempo decorrido e a régua de progresso das etapas.
+- Permite alternar entre execuções individuais e logs diários consolidados, com filtros por nível (`INFO`, `WARN`, `ERROR`), rotina, busca textual e download do arquivo `.jsonl`.
 
 ---
 
