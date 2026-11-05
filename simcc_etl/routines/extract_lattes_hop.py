@@ -1,6 +1,9 @@
+import os
 from pathlib import Path
 
 import docker
+from docker.errors import DockerException
+from requests.exceptions import RequestException
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -10,13 +13,91 @@ from simcc_etl.core.settings import Settings
 
 logger = get_logger('simcc_etl.routines.extract_lattes_hop')
 
+HOP_XML_BIND = '/files/jade-extrator/datasets/lattes_xml'
+
+
+def _docker_client() -> docker.DockerClient:
+    """Cria o cliente Docker com mensagem de erro acionável em pt-BR."""
+    try:
+        client = docker.from_env()
+        client.ping()
+    except (DockerException, RequestException, OSError) as exc:
+        raise RuntimeError(
+            'Não foi possível acessar o daemon Docker para disparar o '
+            'Apache Hop. Se o ETL roda em container, monte o socket '
+            '(/var/run/docker.sock:/var/run/docker.sock) e adicione o '
+            'GID do grupo docker do host ao serviço (group_add: '
+            '["${DOCKER_GID}"], obtido com `getent group docker | cut -d: '
+            '-f3`). Fora de container, verifique se o Docker está ativo '
+            f'e se o usuário pertence ao grupo docker. Detalhe: {exc}'
+        ) from exc
+    return client
+
+
+def _ensure_xml_dir(xml_dir: Path) -> None:
+    """Falha se a pasta de XMLs não existir ou estiver vazia."""
+    if not xml_dir.is_dir():
+        raise RuntimeError(
+            f'Pasta de XMLs do Lattes não encontrada: {xml_dir}. '
+            'Execute a coleta (soap_lattes) antes do hop_index ou '
+            'verifique STORAGE_DIR.'
+        )
+    if not any(xml_dir.iterdir()):
+        raise RuntimeError(
+            f'Pasta de XMLs do Lattes está vazia: {xml_dir}. '
+            'Execute a coleta (soap_lattes) antes do hop_index.'
+        )
+
+
+def _host_path(local_path: Path, settings: Settings) -> str:
+    """Traduz um caminho visto pelo ETL para o caminho no host do Docker.
+
+    O bind mount é resolvido pelo daemon Docker (no host), não pelo processo
+    do ETL. Sem HOST_STORAGE_DIR, assume-se que o ETL roda no próprio host e
+    o caminho local é usado diretamente.
+    """
+    if settings.HOST_STORAGE_DIR is None:
+        return str(local_path.resolve())
+
+    host_root = settings.HOST_STORAGE_DIR
+    if not host_root.is_absolute():
+        raise RuntimeError(
+            f'HOST_STORAGE_DIR deve ser um caminho absoluto no host '
+            f'(recebido: {host_root}).'
+        )
+
+    # abspath (sem seguir symlinks): o host não enxerga links internos do
+    # container, apenas a mesma árvore montada em STORAGE_DIR.
+    storage_root = Path(os.path.abspath(settings.STORAGE_DIR))
+    absolute = Path(os.path.abspath(local_path))
+    try:
+        relative = absolute.relative_to(storage_root)
+    except ValueError as exc:
+        raise RuntimeError(
+            f'O caminho {absolute} está fora de STORAGE_DIR '
+            f'({storage_root}); não é possível traduzi-lo com '
+            'HOST_STORAGE_DIR.'
+        ) from exc
+    return str(host_root / relative)
+
 
 def _run_hop_workflow(
     workflow_path: str,
     xml_mount_path: Path | None = None,
 ) -> Stats:
     settings = Settings()
-    client = docker.from_env()
+
+    volumes = None
+    if xml_mount_path is not None:
+        _ensure_xml_dir(xml_mount_path)
+        volumes = {
+            _host_path(xml_mount_path, settings): {
+                'bind': HOP_XML_BIND,
+                'mode': 'rw',
+            }
+        }
+
+    client = _docker_client()
 
     environment = {
         'HOP_RUN_CONFIG': 'local',
@@ -32,23 +113,17 @@ def _run_hop_workflow(
         'ADMIN_DATABASE_URL': settings.HOP_ADMIN_JDBC_URL,
     }
 
-    volumes = {}
-    if xml_mount_path and xml_mount_path.exists():
-        volumes[str(xml_mount_path.resolve())] = {
-            'bind': '/files/jade-extrator/datasets/lattes_xml',
-            'mode': 'rw',
-        }
-
     logger.info(
         f'Disparando container Apache Hop para workflow: {workflow_path}',
         workflow=workflow_path,
         image=settings.HOP_IMAGE,
+        volumes=volumes,
     )
 
     container = client.containers.run(
         image=settings.HOP_IMAGE,
         environment=environment,
-        volumes=volumes if volumes else None,
+        volumes=volumes,
         network=settings.DOCKER_NETWORK,
         detach=True,
     )
@@ -60,7 +135,8 @@ def _run_hop_workflow(
             if not line:
                 continue
 
-            # Detecta erros críticos no log do Hop (ignorando 'ERROR: DUP' do transform Unique rows)
+            # Detecta erros críticos no log do Hop (ignorando 'ERROR: DUP'
+            # do transform Unique rows)
             is_dup_error = 'ERROR: DUP' in line
             if not is_dup_error and (
                 ' - ERROR' in line
@@ -142,4 +218,6 @@ def run_index(
     ):
         mount_dir = settings.xml_current_path
 
+    # _run_hop_workflow valida a pasta (existe e não vazia) e traduz o
+    # caminho para o host via HOST_STORAGE_DIR quando definido.
     return _run_hop_workflow('workflows/Index.hwf', xml_mount_path=mount_dir)

@@ -50,6 +50,35 @@ services:
       timeout: 3s
       retries: 5
 
+  # API do ETL em container (opcional; suba com `docker compose up -d etl`).
+  # A rotina hop_index cria containers do Apache Hop pelo socket Docker do
+  # host. Como o bind mount dos XMLs é resolvido pelo daemon do HOST, o
+  # storage é montado no MESMO caminho absoluto do host e STORAGE_DIR /
+  # HOST_STORAGE_DIR apontam para ele (ver README, seção Configuração).
+  etl:
+    build: .
+    image: simcc-etl:latest
+    container_name: simcc_etl
+    env_file: .env
+    environment:
+      STORAGE_DIR: ${HOST_STORAGE_DIR:-/opt/simcc/storage}
+      HOST_STORAGE_DIR: ${HOST_STORAGE_DIR:-/opt/simcc/storage}
+    # Sem `:?` de propósito: a interpolação vale para o arquivo inteiro e
+    # quebraria `docker compose up write_db` sem essas variáveis.
+    # GID do grupo docker do host: `getent group docker | cut -d: -f3`
+    group_add:
+      - "${DOCKER_GID:-999}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${HOST_STORAGE_DIR:-/opt/simcc/storage}:${HOST_STORAGE_DIR:-/opt/simcc/storage}
+    ports:
+      - "127.0.0.1:${ETL_PORT:-8001}:8000"
+    networks:
+      - simcc-network
+    profiles:
+      - etl
+    restart: unless-stopped
+
 networks:
   simcc-network:
     external: true

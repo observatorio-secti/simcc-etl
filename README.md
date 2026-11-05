@@ -53,6 +53,24 @@ O `simcc-etl` opera com isolamento de responsabilidades entre escrita e leitura:
 | `SOAP_MAX_WORKERS` | Não | Quantidade máxima de workers em paralelo no download do Lattes (padrão: `16`) |
 | `OPENALEX_API_KEY` | Não | Chave de autenticação da API OpenAlex para limites de taxa ampliados |
 | `OPENALEX_BATCH_COMMIT_SIZE` | Não | Tamanho do lote de registros com sucesso para commit no banco na rotina OpenAlex (padrão: `50`) |
+| `HOP_IMAGE` | Não | Imagem Docker do extrator Apache Hop (padrão: `gleidsoncosta/simcc-extrator:latest`) |
+| `HOP_WRITE_JDBC_URL` / `HOP_ADMIN_JDBC_URL` | Sim | URLs JDBC usadas **de dentro do container do Hop** (hosts da rede `simcc-network`, ex.: `write_db`, `admin_db`) |
+| `DOCKER_NETWORK` | Não | Rede Docker em que o container do Hop é criado (padrão: `simcc-network`) |
+| `STORAGE_DIR` | Não | Pasta de trabalho do ETL (XMLs em `xml/current` e `xml/run_current`, CSVs CAPES em `seed/`, cache OpenAlex). Padrão: `storage` (relativo ao diretório de execução) |
+| `HOST_STORAGE_DIR` | Só em container | Caminho **absoluto no host do daemon Docker** equivalente a `STORAGE_DIR`. Vazio/ausente = ETL roda no próprio host e o caminho local é usado no bind mount |
+| `DOCKER_GID` | Só em container | Lido apenas pelo `compose.yaml` (`group_add`): GID do grupo `docker` do host, obtido com `getent group docker \| cut -d: -f3` |
+| `ETL_PORT` | Não | Lido apenas pelo `compose.yaml`: porta do host publicada em `127.0.0.1` para a API (padrão: `8001`) |
+
+### Apache Hop, socket Docker e caminho dos XMLs no host
+
+As rotinas `hop_seed` e `hop_index` criam containers efêmeros do Apache Hop pelo daemon Docker (`docker.from_env()`). Dois pontos importam quando o **próprio ETL roda em container**:
+
+1. **Socket Docker**: monte `/var/run/docker.sock` e adicione o GID do grupo `docker` do host ao container (`group_add`), pois o `appuser` (uid `1000`) da imagem não tem acesso ao socket por padrão. Sem isso, a rotina falha com uma mensagem explicando o que montar.
+2. **Bind mount dos XMLs**: o volume `xml/... -> /files/jade-extrator/datasets/lattes_xml` é resolvido pelo daemon **do host**, não pelo container do ETL. Por isso o ETL envia ao Docker `HOST_STORAGE_DIR / <caminho relativo a STORAGE_DIR>`. O jeito mais simples (usado no serviço `etl` do `compose.yaml`) é montar o storage no **mesmo caminho absoluto** do host e usar `STORAGE_DIR=HOST_STORAGE_DIR=/opt/simcc/storage`.
+
+`hop_index` falha com erro explícito se a pasta de XMLs a montar não existir ou estiver vazia (antes, o Hop rodava sem volume e não importava nada). `hop_seed` não monta XMLs e não depende dessa pasta.
+
+Rodando localmente com Poetry, nada disso é necessário: deixe `HOST_STORAGE_DIR` vazio e garanta que seu usuário pertença ao grupo `docker`.
 
 ---
 
@@ -115,6 +133,14 @@ poetry install
 ```bash
 docker compose up -d write_db read_db redis
 ```
+
+**Opcional — API do ETL em container**: o serviço `etl` (perfil `etl`) só sobe quando pedido explicitamente. Defina no `.env` `HOST_STORAGE_DIR` (absoluto, gravável pelo uid `1000`) e `DOCKER_GID`, e use hosts da rede `simcc-network` nas URLs de banco/Redis (ex.: `write_db:5432`, não `localhost`):
+```bash
+echo "DOCKER_GID=$(getent group docker | cut -d: -f3)" >> .env
+sudo mkdir -p /opt/simcc/storage/xml /opt/simcc/storage/seed && sudo chown -R 1000:1000 /opt/simcc/storage
+docker compose --profile etl up -d --build etl
+```
+A API fica em `http://127.0.0.1:8001`. Os CSVs CAPES (`seed/`) devem estar em `HOST_STORAGE_DIR/seed`.
 
 ### 4. Execução via CLI
 

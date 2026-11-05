@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -42,6 +43,10 @@ class Settings(BaseSettings):
 
     # Paths
     STORAGE_DIR: Path = Path('storage')
+    # Caminho absoluto, no HOST do daemon Docker, equivalente a STORAGE_DIR.
+    # Necessário quando o ETL roda em container: o bind mount dos XMLs no
+    # container do Hop é resolvido pelo daemon do host, não pelo ETL.
+    HOST_STORAGE_DIR: Path | None = None
     LOG_DIR: Path = Path('logs')
 
     # External APIs
@@ -49,6 +54,13 @@ class Settings(BaseSettings):
     CNPQ_PROXY_URL: str = 'https://simcc.uesc.br/v3/api'
     OPENALEX_API_KEY: str | None = None
     OPENALEX_BATCH_COMMIT_SIZE: int = 50
+
+    @field_validator('HOST_STORAGE_DIR', mode='before')
+    @classmethod
+    def _empty_host_storage_as_none(cls, value):
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @property
     def xml_current_path(self) -> Path:
