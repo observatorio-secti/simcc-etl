@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN pip install "poetry==$POETRY_VERSION"
 
-COPY pyproject.toml poetry.lock* README.md ./
+COPY pyproject.toml poetry.lock* ./
 
 RUN poetry install --only main --no-root
 
@@ -44,7 +44,7 @@ RUN useradd -m -u 1000 appuser && \
 COPY --from=builder --chown=appuser:appuser /app/.venv /app/.venv
 COPY --chown=appuser:appuser simcc_etl ./simcc_etl
 COPY --chown=appuser:appuser migrations ./migrations
-COPY --chown=appuser:appuser alembic.ini pyproject.toml README.md ./
+COPY --chown=appuser:appuser alembic.ini pyproject.toml ./
 COPY --chown=appuser:appuser storage ./storage
 
 USER appuser

@@ -5,7 +5,6 @@ description = "Pipeline de ETL desacoplado do SIMCC"
 authors = [
     {name = "meirelesgc", email = "geu_costa@outlook.com"}
 ]
-readme = "README.md"
 requires-python = ">=3.12,<4.0"
 dependencies = [
     "fastapi[standard]>=0.115.0,<1.0.0",
