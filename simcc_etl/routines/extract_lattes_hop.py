@@ -261,6 +261,11 @@ def _stage_hop_input(source: Path, target: Path) -> int:
         )
 
     target.mkdir(parents=True, exist_ok=True)
+    try:
+        target.chmod(0o777)
+    except OSError:
+        pass
+
     for entry in target.iterdir():
         if entry.is_dir() and not entry.is_symlink():
             shutil.rmtree(entry)
@@ -273,6 +278,10 @@ def _stage_hop_input(source: Path, target: Path) -> int:
             os.link(xml_file, destination)
         except OSError:
             shutil.copy2(xml_file, destination)
+        try:
+            destination.chmod(0o666)
+        except OSError:
+            pass
 
     logger.info(
         'XMLs preparados para o Hop Server',

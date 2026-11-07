@@ -1,21 +1,20 @@
 services:
-  # Serviço principal da API do SimCC ETL
   etl:
     build: .
     image: simcc-etl:latest
-    container_name: simcc_etl
     env_file: .env
     environment:
       STORAGE_DIR: /app/storage
       HOP_SERVER_URL: ${HOP_SERVER_URL:-http://hop:8080}
+      HOP_SERVER_USER: ${HOP_SERVER_USER:-cluster}
+      HOP_SERVER_PASSWORD: ${HOP_SERVER_PASSWORD:-cluster}
     volumes:
       - ${STORAGE_PATH:-./storage}:/app/storage
+      - hop_input:/app/storage/xml/hop_input
     ports:
       - "127.0.0.1:${ETL_PORT:-8001}:8000"
-    networks:
-      - simcc-network
     restart: unless-stopped
 
-networks:
-  simcc-network:
-    external: true
+volumes:
+  hop_input:
+    name: simcc_hop_input

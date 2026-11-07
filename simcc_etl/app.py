@@ -1,3 +1,4 @@
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -12,6 +13,7 @@ from simcc_etl.routers import router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    os.umask(0o022)
     configure_logging()
     try:
         create_etl_tables()

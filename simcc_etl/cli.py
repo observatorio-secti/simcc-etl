@@ -12,6 +12,7 @@ from simcc_etl.pipeline import (
 
 
 def main():
+    os.umask(0o022)
     os.chdir(Path(__file__).resolve().parents[1])
     parser = argparse.ArgumentParser(description='SimCC ETL CLI')
     parser.add_argument(

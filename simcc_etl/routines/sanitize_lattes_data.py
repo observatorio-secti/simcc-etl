@@ -278,7 +278,9 @@ def sync_admin_data(
         )
     )
     # Garante que os IDs e slugs de coleções reflitam exatamente o admin_db
-    write_session.execute(text('TRUNCATE TABLE public.researcher_collection CASCADE;'))
+    write_session.execute(
+        text('TRUNCATE TABLE public.researcher_collection CASCADE;')
+    )
     write_session.execute(text('DELETE FROM public.collection;'))
     for col in admin_collections:
         write_session.execute(
