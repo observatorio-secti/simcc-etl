@@ -1,84 +1,5 @@
 services:
-  write_db:
-    image: pgvector/pgvector:pg17
-    container_name: simcc_write_db
-    environment:
-      POSTGRES_USER: ${WRITE_DB_USER:-postgres}
-      POSTGRES_PASSWORD: ${WRITE_DB_PASSWORD:-postgres}
-      POSTGRES_DB: ${WRITE_DB_NAME:-simcc_write}
-    ports:
-      - "${WRITE_DB_PORT:-5435}:5432"
-    networks:
-      - simcc-network
-    volumes:
-      - write_db_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${WRITE_DB_USER:-postgres} -d ${WRITE_DB_NAME:-simcc_write}"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  read_db:
-    image: pgvector/pgvector:pg17
-    container_name: simcc_read_db
-    environment:
-      POSTGRES_USER: ${READ_DB_USER:-postgres}
-      POSTGRES_PASSWORD: ${READ_DB_PASSWORD:-postgres}
-      POSTGRES_DB: ${READ_DB_NAME:-simcc}
-    ports:
-      - "${READ_DB_PORT:-5434}:5432"
-    networks:
-      - simcc-network
-    volumes:
-      - read_db_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${READ_DB_USER:-postgres} -d ${READ_DB_NAME:-simcc}"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  redis:
-    image: redis:7-alpine
-    container_name: simcc_redis
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
-    networks:
-      - simcc-network
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-
-  # Apache Hop Server long-lived. O ETL dispara Seeding.hwf/Index.hwf pela
-  # API REST (/hop/execWorkflow); não há socket Docker nem container efêmero.
-  # Imagem construída a partir de ../Jade-Extrator-Hop (base apache/hop).
-  hop:
-    image: gleidsoncosta/simcc-extrator:latest
-    container_name: simcc_hop
-    environment:
-      HOP_PROJECT_NAME: Jade-Extrator
-      HOP_PROJECT_FOLDER: /files/jade-extrator
-      HOP_LOG_LEVEL: Basic
-      HOP_SERVER_USER: ${HOP_SERVER_USER:-cluster}
-      # A imagem lê HOP_SERVER_PASS; o ETL usa HOP_SERVER_PASSWORD.
-      HOP_SERVER_PASS: ${HOP_SERVER_PASSWORD:-cluster}
-      HOP_SERVER_PORT: "8080"
-      # Execuções esquecidas saem da memória do servidor após 24h.
-      HOP_SERVER_MAX_OBJECT_TIMEOUT: "1440"
-    volumes:
-      # Pasta fixa preenchida pelo ETL antes de cada hop_index. Precisa
-      # existir antes do `up` (senão o Docker a cria como root).
-      - ${STORAGE_PATH:-./storage}/xml/hop_input:/files/jade-extrator/datasets/lattes_xml
-    ports:
-      # Publicado só em loopback: usado pelo ETL rodando via Poetry.
-      - "127.0.0.1:${HOP_SERVER_PORT:-8080}:8080"
-    networks:
-      - simcc-network
-    restart: unless-stopped
-
-  # API do ETL em container (opcional; suba com
-  # `docker compose --profile etl up -d etl`).
+  # Serviço principal da API do SimCC ETL
   etl:
     build: .
     image: simcc-etl:latest
@@ -86,23 +7,15 @@ services:
     env_file: .env
     environment:
       STORAGE_DIR: /app/storage
-      HOP_SERVER_URL: http://hop:8080
+      HOP_SERVER_URL: ${HOP_SERVER_URL:-http://hop:8080}
     volumes:
       - ${STORAGE_PATH:-./storage}:/app/storage
     ports:
       - "127.0.0.1:${ETL_PORT:-8001}:8000"
     networks:
       - simcc-network
-    depends_on:
-      - hop
-    profiles:
-      - etl
     restart: unless-stopped
 
 networks:
   simcc-network:
     external: true
-
-volumes:
-  write_db_data:
-  read_db_data:
