@@ -9,12 +9,14 @@ services:
       HOP_SERVER_USER: ${HOP_SERVER_USER:-cluster}
       HOP_SERVER_PASSWORD: ${HOP_SERVER_PASSWORD:-cluster}
     volumes:
-      - ${STORAGE_PATH:-./storage}:/app/storage
+      - etl_storage:/app/storage
       - hop_input:/app/storage/xml/hop_input
     ports:
       - "127.0.0.1:${ETL_PORT:-8001}:8000"
     restart: unless-stopped
 
 volumes:
+  etl_storage:
+    name: simcc_etl_storage
   hop_input:
     name: simcc_hop_input
