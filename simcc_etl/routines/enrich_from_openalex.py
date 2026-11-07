@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -16,6 +17,16 @@ logger = get_logger('simcc_etl.routines.enrich_from_openalex')
 WORK_URL = 'https://api.openalex.org/works/https://doi.org/'
 AUTHOR_URL = 'https://api.openalex.org/authors/orcid:'
 DEFAULT_MAIL = 'suporte@simcc.org'
+
+
+def _clean_orcid(orcid: str | None) -> str | None:
+    if not orcid:
+        return None
+    cleaned = str(orcid).strip()
+    for prefix in ('https://orcid.org/', 'http://orcid.org/', 'orcid.org/'):
+        if cleaned.startswith(prefix):
+            cleaned = cleaned[len(prefix):].strip()
+    return cleaned if cleaned else None
 
 
 def _build_abstract(inverted_index: dict[str, list[int]] | None) -> str | None:
@@ -37,10 +48,35 @@ def _safe_get(data: Any, *keys: str) -> Any:
     return data
 
 
+def _partition_unseen_and_retry(
+    rows: list[Any], not_found_path: Path
+) -> list[Any]:
+    """Ordena registros colocando os que já deram 404 no final da fila."""
+    if not not_found_path.is_dir():
+        return rows
+
+    known_404: set[str] = {
+        f.stem
+        for f in not_found_path.iterdir()
+        if f.is_file() and f.suffix == '.json'
+    }
+    if not known_404:
+        return rows
+
+    unseen = [row for row in rows if str(row['id']) not in known_404]
+    retry = [row for row in rows if str(row['id']) in known_404]
+    logger.info(
+        f'Queue partitioned: {len(unseen)} unseen prioritized, '
+        f'{len(retry)} prior 404 pushed to end'
+    )
+    return unseen + retry
+
+
 def _get_or_fetch_payload(
     client: httpx.Client,
     url: str,
     cache_file: Path,
+    not_found_file: Path | None = None,
 ) -> dict[str, Any] | None:
     if cache_file.is_file():
         try:
@@ -55,7 +91,28 @@ def _get_or_fetch_payload(
             payload = resp.json()
             with open(cache_file, 'w', encoding='utf-8') as f:
                 json.dump(payload, f)
+            if not_found_file and not_found_file.is_file():
+                try:
+                    not_found_file.unlink()
+                except OSError:
+                    pass
             return payload
+        elif resp.status_code == 404 and not_found_file:
+            try:
+                with open(not_found_file, 'w', encoding='utf-8') as f:
+                    json.dump(
+                        {
+                            'status_code': 404,
+                            'attempted_at': (
+                                datetime.now(timezone.utc).isoformat()
+                            ),
+                        },
+                        f,
+                    )
+            except Exception as e:
+                logger.warning(
+                    f'Failed to write not_found cache {not_found_file}: {e}'
+                )
     except Exception as e:
         logger.warning(f'Failed OpenAlex fetch for {url}: {e}')
 
@@ -65,16 +122,23 @@ def _get_or_fetch_payload(
 def _process_article(
     client: httpx.Client,
     row: Any,
-    art_path: Path,
+    base_storage: Path,
     session: Session,
     insert_art_sql: Any,
 ) -> bool:
     article_id = row['id']
-    doi = row['doi']
-    art_file = art_path / f'{article_id}.json'
+    raw_doi = row['doi']
+    doi = str(raw_doi).strip() if raw_doi else ''
+    if not doi:
+        return False
+
+    art_file = base_storage / 'article' / f'{article_id}.json'
+    not_found_file = (
+        base_storage / 'not_found' / 'article' / f'{article_id}.json'
+    )
     url = f'{WORK_URL}{doi}?mailto={DEFAULT_MAIL}'
 
-    payload = _get_or_fetch_payload(client, url, art_file)
+    payload = _get_or_fetch_payload(client, url, art_file, not_found_file)
     if payload is None:
         return False
 
@@ -92,68 +156,77 @@ def _process_article(
         issn_val = _safe_get(payload, 'primary_location', 'source', 'issn')
         issn_str = str(issn_val) if issn_val is not None else None
 
-        session.execute(
-            insert_art_sql,
-            {
-                'id': uuid4(),
-                'article_id': article_id,
-                'article_institution': inst_name,
-                'issn': issn_str,
-                'abstract': abstract,
-                'authors': '; '.join(authors),
-                'citations_count': payload.get('cited_by_count', 0),
-                'language': payload.get('language'),
-                'landing_page_url': _safe_get(
-                    payload, 'primary_location', 'landing_page_url'
-                ),
-                'pdf': _safe_get(payload, 'primary_location', 'pdf_url'),
-            },
-        )
+        with session.begin_nested():
+            session.execute(
+                insert_art_sql,
+                {
+                    'id': uuid4(),
+                    'article_id': article_id,
+                    'article_institution': inst_name,
+                    'issn': issn_str,
+                    'abstract': abstract,
+                    'authors': '; '.join(authors),
+                    'citations_count': payload.get('cited_by_count', 0),
+                    'language': payload.get('language'),
+                    'landing_page_url': _safe_get(
+                        payload, 'primary_location', 'landing_page_url'
+                    ),
+                    'pdf': _safe_get(payload, 'primary_location', 'pdf_url'),
+                },
+            )
         return True
     except Exception as e:
         logger.warning(
             f'Failed to insert article {article_id} (DOI: {doi}): {e}'
         )
-        session.rollback()
         return False
 
 
 def _process_researcher(
     client: httpx.Client,
     row: Any,
-    res_path: Path,
+    base_storage: Path,
     session: Session,
     insert_res_sql: Any,
 ) -> bool:
     r_id = row['id']
-    orcid = row['orcid']
-    res_file = res_path / f'{r_id}.json'
+    raw_orcid = row['orcid']
+    orcid = _clean_orcid(raw_orcid)
+    if not orcid:
+        return False
+
+    res_file = base_storage / 'researcher' / f'{r_id}.json'
+    not_found_file = (
+        base_storage / 'not_found' / 'researcher' / f'{r_id}.json'
+    )
     url = f'{AUTHOR_URL}{orcid}?mailto={DEFAULT_MAIL}'
 
-    payload = _get_or_fetch_payload(client, url, res_file)
+    payload = _get_or_fetch_payload(client, url, res_file, not_found_file)
     if payload is None:
         return False
 
     try:
-        session.execute(
-            insert_res_sql,
-            {
-                'researcher_id': r_id,
-                'h_index': _safe_get(payload, 'summary_stats', 'h_index'),
-                'works_count': payload.get('works_count'),
-                'cited_by_count': payload.get('cited_by_count'),
-                'i10_index': _safe_get(payload, 'summary_stats', 'i10_index'),
-                'scopus': _safe_get(payload, 'ids', 'scopus'),
-                'orcid': orcid,
-                'openalex': payload.get('id'),
-            },
-        )
+        with session.begin_nested():
+            session.execute(
+                insert_res_sql,
+                {
+                    'researcher_id': r_id,
+                    'h_index': _safe_get(payload, 'summary_stats', 'h_index'),
+                    'works_count': payload.get('works_count'),
+                    'cited_by_count': payload.get('cited_by_count'),
+                    'i10_index': _safe_get(
+                        payload, 'summary_stats', 'i10_index'
+                    ),
+                    'scopus': _safe_get(payload, 'ids', 'scopus'),
+                    'orcid': orcid[:19],
+                    'openalex': payload.get('id'),
+                },
+            )
         return True
     except Exception as e:
         logger.warning(
             f'Failed to insert researcher {r_id} (ORCID: {orcid}): {e}'
         )
-        session.rollback()
         return False
 
 
@@ -172,30 +245,68 @@ def run(
     base_storage = storage_dir or (settings.STORAGE_DIR / 'openalex')
     art_path = base_storage / 'article'
     res_path = base_storage / 'researcher'
+    art_not_found_path = base_storage / 'not_found' / 'article'
+    res_not_found_path = base_storage / 'not_found' / 'researcher'
     art_path.mkdir(parents=True, exist_ok=True)
     res_path.mkdir(parents=True, exist_ok=True)
+    art_not_found_path.mkdir(parents=True, exist_ok=True)
+    res_not_found_path.mkdir(parents=True, exist_ok=True)
 
     headers = {'User-Agent': 'simcc-etl/1.0'}
     if settings.OPENALEX_API_KEY:
         headers['api-key'] = settings.OPENALEX_API_KEY
 
     # 1. Artigos
-    art_sql = text("""
+    art_where = [
+        "bp.doi IS NOT NULL",
+        "TRIM(bp.doi) != ''",
+        "oa.article_id IS NULL",
+    ]
+    art_params: dict[str, Any] = {}
+    if researcher_ids:
+        art_where.append("bp.researcher_id = ANY(:researcher_ids)")
+        art_params['researcher_ids'] = list(researcher_ids)
+    if lattes_ids:
+        art_where.append("r.lattes_id = ANY(:lattes_ids)")
+        art_params['lattes_ids'] = list(lattes_ids)
+
+    art_join_researcher = (
+        "JOIN researcher r ON r.id = bp.researcher_id" if lattes_ids else ""
+    )
+    art_sql_str = f"""
         SELECT bp.id, bp.doi
         FROM bibliographic_production bp
+        {art_join_researcher}
         LEFT JOIN openalex_article oa ON oa.article_id = bp.id
-        WHERE bp.doi IS NOT NULL AND oa.article_id IS NULL;
-    """)
-    art_rows = session.execute(art_sql).mappings().all()
+        WHERE {' AND '.join(art_where)};
+    """
+    art_rows = session.execute(text(art_sql_str), art_params).mappings().all()
 
     # 2. Pesquisadores
-    res_sql = text("""
+    res_where = [
+        "r.orcid IS NOT NULL",
+        "TRIM(r.orcid) != ''",
+        "oar.researcher_id IS NULL",
+    ]
+    res_params: dict[str, Any] = {}
+    if researcher_ids:
+        res_where.append("r.id = ANY(:researcher_ids)")
+        res_params['researcher_ids'] = list(researcher_ids)
+    if lattes_ids:
+        res_where.append("r.lattes_id = ANY(:lattes_ids)")
+        res_params['lattes_ids'] = list(lattes_ids)
+
+    res_sql_str = f"""
         SELECT r.id, r.orcid
         FROM researcher r
         LEFT JOIN openalex_researcher oar ON oar.researcher_id = r.id
-        WHERE r.orcid IS NOT NULL AND oar.researcher_id IS NULL;
-    """)
-    res_rows = session.execute(res_sql).mappings().all()
+        WHERE {' AND '.join(res_where)};
+    """
+    res_rows = session.execute(text(res_sql_str), res_params).mappings().all()
+
+    # Particionamento: inéditos no topo, 404 no fim da fila
+    art_rows = _partition_unseen_and_retry(art_rows, art_not_found_path)
+    res_rows = _partition_unseen_and_retry(res_rows, res_not_found_path)
 
     total_found = len(art_rows) + len(res_rows)
     succeeded = 0
@@ -231,7 +342,7 @@ def run(
         # Process articles
         for row in art_rows:
             if _process_article(
-                client, row, art_path, session, insert_art_sql
+                client, row, base_storage, session, insert_art_sql
             ):
                 succeeded += 1
                 uncommitted_count += 1
@@ -243,13 +354,12 @@ def run(
                     )
                     uncommitted_count = 0
             else:
-                uncommitted_count = 0
                 failed += 1
 
         # Process researchers
         for row in res_rows:
             if _process_researcher(
-                client, row, res_path, session, insert_res_sql
+                client, row, base_storage, session, insert_res_sql
             ):
                 succeeded += 1
                 uncommitted_count += 1
@@ -261,7 +371,6 @@ def run(
                     )
                     uncommitted_count = 0
             else:
-                uncommitted_count = 0
                 failed += 1
 
     # Commit residual para quaisquer registros restantes
