@@ -14,7 +14,7 @@ O `simcc-etl` opera com isolamento de responsabilidades entre escrita e leitura:
        ▼
 [SimCC ETL Pipeline]
   ├── Pre-Hop: Seeding, Import CAPES, SOAP Lattes (Consome Parquet do Admin + Proxy UESC)
-  ├── Hop Execution: Docker Jade-Extrator (Index.hwf)
+  ├── Hop Execution: Hop Server long-lived Jade-Extrator (Index.hwf via REST)
   ├── Post-Hop: SQL Sanitization, Researcher Production, IndProd (Pesquisador / Grupo / PG)
   └── Enrichments: Classificação, Dicionários, OpenAlex
        │
@@ -29,11 +29,11 @@ O `simcc-etl` opera com isolamento de responsabilidades entre escrita e leitura:
 
 1. **Lock Concorrente Robusto**: `pg_try_advisory_lock(9001001)` no PostgreSQL evita execuções simultâneas por CLI ou API.
 2. **Logs Estruturados JSONL**: Cada execução possui seu próprio log (`logs/runs/{run_id}.jsonl`) e log diário (`logs/{YYYY-MM-DD}.jsonl`).
-3. **Apache Hop via Docker SDK**: O container `gleidsoncosta/simcc-extrator:latest` roda de forma isolada, montando os volumes do projeto.
+3. **Apache Hop Server long-lived**: o serviço `hop` (`gleidsoncosta/simcc-extrator:latest`, base `apache/hop`) fica no ar e o ETL dispara os workflows pela API REST. Não há socket Docker nem container efêmero.
 4. **Proxy CNPq Automático**: Utiliza a rota alternativa do proxy (`https://simcc.uesc.br/v3/api`) quando o webservice oficial do CNPq está inacessível.
 5. **Cálculo de IndProd Unificado**: Barema tipado, separação estrita de patentes concedidas/não-concedidas, cálculo para pesquisadores, programas de pós e grupos de pesquisa.
 6. **Publicação Atômica**: `psycopg` binary COPY com `session_replication_role = 'replica'`, atualização das 15 visões materializadas e invalidação de cache via incremento de geração no Redis (`simcc:v2:search:generation`).
-7. **Enriquecimento Incremental com OpenAlex**: Commit em lotes a cada 50 registros de sucesso com cache local em disco (`storage/openalex/`), viabilizando interrupção e retomada resiliente sem perda de progresso.
+7. **Enriquecimento Incremental com OpenAlex**: Commit em lotes a cada 50 registros de sucesso com cache local em disco (`storage/openalex/`), isolamento transacional via savepoints (`begin_nested`), priorização de registros inéditos e deslocamento de itens com resposta 404 para o fim da fila (`storage/openalex/not_found/`).
 
 ---
 
@@ -53,24 +53,27 @@ O `simcc-etl` opera com isolamento de responsabilidades entre escrita e leitura:
 | `SOAP_MAX_WORKERS` | Não | Quantidade máxima de workers em paralelo no download do Lattes (padrão: `16`) |
 | `OPENALEX_API_KEY` | Não | Chave de autenticação da API OpenAlex para limites de taxa ampliados |
 | `OPENALEX_BATCH_COMMIT_SIZE` | Não | Tamanho do lote de registros com sucesso para commit no banco na rotina OpenAlex (padrão: `50`) |
-| `HOP_IMAGE` | Não | Imagem Docker do extrator Apache Hop (padrão: `gleidsoncosta/simcc-extrator:latest`) |
-| `HOP_WRITE_JDBC_URL` / `HOP_ADMIN_JDBC_URL` | Sim | URLs JDBC usadas **de dentro do container do Hop** (hosts da rede `simcc-network`, ex.: `write_db`, `admin_db`) |
-| `DOCKER_NETWORK` | Não | Rede Docker em que o container do Hop é criado (padrão: `simcc-network`) |
-| `STORAGE_DIR` | Não | Pasta de trabalho do ETL (XMLs em `xml/current` e `xml/run_current`, CSVs CAPES em `seed/`, cache OpenAlex). Padrão: `storage` (relativo ao diretório de execução) |
-| `HOST_STORAGE_DIR` | Só em container | Caminho **absoluto no host do daemon Docker** equivalente a `STORAGE_DIR`. Vazio/ausente = ETL roda no próprio host e o caminho local é usado no bind mount |
-| `DOCKER_GID` | Só em container | Lido apenas pelo `compose.yaml` (`group_add`): GID do grupo `docker` do host, obtido com `getent group docker \| cut -d: -f3` |
+| `HOP_SERVER_URL` | Não | URL do Hop Server (padrão: `http://localhost:8080`, para o ETL via Poetry; com o ETL em container: `http://hop:8080`, já injetado pelo `compose.yaml`) |
+| `HOP_SERVER_USER` / `HOP_SERVER_PASSWORD` | Sim em produção | Credenciais Basic do Hop Server (padrão: `cluster`/`cluster`). O `compose.yaml` repassa os mesmos valores ao serviço `hop` (`HOP_SERVER_PASS` na imagem) |
+| `HOP_SERVER_TIMEOUT` | Não | Tempo máximo, em segundos, de uma execução síncrona de workflow (padrão: `21600`, ou seja, 6h) |
+| `HOP_WRITE_JDBC_URL` / `HOP_ADMIN_JDBC_URL` | Sim | URLs JDBC usadas **de dentro do Hop Server**, com hosts da rede `simcc-network` (ex.: `write_db`, `admin_db`). São enviadas como variáveis `DATABASE_URL`/`ADMIN_DATABASE_URL` a cada execução |
+| `STORAGE_DIR` | Não | Pasta de trabalho do ETL: XMLs em `xml/current`, `xml/run_current` e `xml/hop_input`, CSVs CAPES em `seed/` e cache OpenAlex. Padrão: `storage` (relativo ao diretório de execução) |
+| `STORAGE_PATH` | Não | Lido apenas pelo `compose.yaml`: pasta do host montada como storage do `etl` (`/app/storage`), cuja subpasta `xml/hop_input` é montada no `hop` (padrão: `./storage`) |
+| `HOP_SERVER_PORT` | Não | Lido apenas pelo `compose.yaml`: porta do Hop Server publicada em `127.0.0.1` (padrão: `8080`; mantenha `HOP_SERVER_URL` coerente) |
 | `ETL_PORT` | Não | Lido apenas pelo `compose.yaml`: porta do host publicada em `127.0.0.1` para a API (padrão: `8001`) |
 
-### Apache Hop, socket Docker e caminho dos XMLs no host
+### Apache Hop Server e pasta de XMLs
 
-As rotinas `hop_seed` e `hop_index` criam containers efêmeros do Apache Hop pelo daemon Docker (`docker.from_env()`). Dois pontos importam quando o **próprio ETL roda em container**:
+As rotinas `hop_seed` e `hop_index` chamam o Hop Server, um container permanente (serviço `hop` do `compose.yaml`) que carrega o projeto `Jade-Extrator` ao subir:
 
-1. **Socket Docker**: monte `/var/run/docker.sock` e adicione o GID do grupo `docker` do host ao container (`group_add`), pois o `appuser` (uid `1000`) da imagem não tem acesso ao socket por padrão. Sem isso, a rotina falha com uma mensagem explicando o que montar.
-2. **Bind mount dos XMLs**: o volume `xml/... -> /files/jade-extrator/datasets/lattes_xml` é resolvido pelo daemon **do host**, não pelo container do ETL. Por isso o ETL envia ao Docker `HOST_STORAGE_DIR / <caminho relativo a STORAGE_DIR>`. O jeito mais simples (usado no serviço `etl` do `compose.yaml`) é montar o storage no **mesmo caminho absoluto** do host e usar `STORAGE_DIR=HOST_STORAGE_DIR=/opt/simcc/storage`.
+1. O ETL confere o servidor em `/hop/status`. Se ele estiver inacessível ou recusar as credenciais, a rotina falha com mensagem explicando o que ajustar.
+2. Executa `/hop/execWorkflow/?workflow=${PROJECT_HOME}/workflows/<X>.hwf`, que é **síncrono**.
+3. Esse endpoint responde `OK` mesmo quando o workflow falha e não devolve o id da execução. Por isso o ETL localiza a execução nova em `/hop/status`, lê o status final e o log em `/hop/workflowStatus` e falha se o status não for `Finished` ou se o log tiver erro fatal (` - ERROR`, exceto `ERROR: DUP`, ou `result=[false]`). O log do Hop é repassado ao log estruturado da execução.
+4. Remove a execução do servidor (`/hop/removeWorkflow`) para não acumular memória.
 
-`hop_index` falha com erro explícito se a pasta de XMLs a montar não existir ou estiver vazia (antes, o Hop rodava sem volume e não importava nada). `hop_seed` não monta XMLs e não depende dessa pasta.
+Os pipelines do Hop leem sempre `${PROJECT_HOME}/datasets/lattes_xml/`, um caminho fixo em dezenas de `.hpl`. O `compose.yaml` monta nele a pasta `STORAGE_DIR/xml/hop_input`. Antes de cada `hop_index`, o ETL esvazia o **conteúdo** dessa pasta, sem recriá-la (recriar deixaria órfão o bind mount do `hop`), e a preenche com **hardlinks** dos XMLs de `xml/run_current` (quando há `lattes_ids` e a pasta tem XMLs) ou de `xml/current`. Se os dois não estiverem no mesmo sistema de arquivos, o ETL copia. Se a pasta de origem não existir ou não tiver XMLs, `hop_index` falha antes de chamar o Hop. `hop_seed` não usa XMLs.
 
-Rodando localmente com Poetry, nada disso é necessário: deixe `HOST_STORAGE_DIR` vazio e garanta que seu usuário pertença ao grupo `docker`.
+> A pasta `xml/hop_input` precisa existir **antes** do `docker compose up hop`. Do contrário, o Docker a cria como `root` e o ETL não consegue preenchê-la.
 
 ---
 
@@ -105,8 +108,8 @@ simcc-etl/
 │   └── routers.py            # Endpoints REST (/routines, /runs, /logs)
 ├── storage/
 │   ├── seed/                 # Arquivos CSV de seed CAPES
-│   ├── xml/                  # Cache de XMLs Lattes
-│   └── openalex/             # Cache de respostas OpenAlex
+│   ├── xml/                  # XMLs Lattes: current/, run_current/ e hop_input/ (lida pelo Hop Server)
+│   ├── openalex/             # Cache de respostas OpenAlex (article/, researcher/, not_found/)
 ├── tests/
 │   ├── unit/
 │   └── integration/
@@ -134,13 +137,20 @@ poetry install
 docker compose up -d write_db read_db redis
 ```
 
-**Opcional — API do ETL em container**: o serviço `etl` (perfil `etl`) só sobe quando pedido explicitamente. Defina no `.env` `HOST_STORAGE_DIR` (absoluto, gravável pelo uid `1000`) e `DOCKER_GID`, e use hosts da rede `simcc-network` nas URLs de banco/Redis (ex.: `write_db:5432`, não `localhost`):
+O Hop Server (serviço `hop`) também é necessário para `hop_seed` e `hop_index`. A imagem é construída a partir de `../Jade-Extrator-Hop`:
 ```bash
-echo "DOCKER_GID=$(getent group docker | cut -d: -f3)" >> .env
-sudo mkdir -p /opt/simcc/storage/xml /opt/simcc/storage/seed && sudo chown -R 1000:1000 /opt/simcc/storage
+docker build -t gleidsoncosta/simcc-extrator:latest ../Jade-Extrator-Hop
+mkdir -p storage/xml/hop_input
+docker compose up -d hop
+```
+Depois de reconstruir a imagem (alterações em `.hwf`/`.hpl`), recrie o servidor com `docker compose up -d --force-recreate hop`: o Hop Server carrega o projeto só ao subir.
+
+**Opcional: API do ETL em container.** O serviço `etl` (perfil `etl`) só sobe quando pedido explicitamente. Ele monta `STORAGE_PATH` em `/app/storage` e fala com o Hop por `http://hop:8080`. Use hosts da rede `simcc-network` nas URLs de banco e Redis (ex.: `write_db:5432`, não `localhost`). A pasta precisa ser gravável pelo uid `1000` (`appuser` da imagem):
+```bash
+sudo chown -R 1000:1000 storage
 docker compose --profile etl up -d --build etl
 ```
-A API fica em `http://127.0.0.1:8001`. Os CSVs CAPES (`seed/`) devem estar em `HOST_STORAGE_DIR/seed`.
+A API fica em `http://127.0.0.1:8001`.
 
 ### 4. Execução via CLI
 

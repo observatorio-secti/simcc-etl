@@ -50,31 +50,51 @@ services:
       timeout: 3s
       retries: 5
 
-  # API do ETL em container (opcional; suba com `docker compose up -d etl`).
-  # A rotina hop_index cria containers do Apache Hop pelo socket Docker do
-  # host. Como o bind mount dos XMLs é resolvido pelo daemon do HOST, o
-  # storage é montado no MESMO caminho absoluto do host e STORAGE_DIR /
-  # HOST_STORAGE_DIR apontam para ele (ver README, seção Configuração).
+  # Apache Hop Server long-lived. O ETL dispara Seeding.hwf/Index.hwf pela
+  # API REST (/hop/execWorkflow); não há socket Docker nem container efêmero.
+  # Imagem construída a partir de ../Jade-Extrator-Hop (base apache/hop).
+  hop:
+    image: gleidsoncosta/simcc-extrator:latest
+    container_name: simcc_hop
+    environment:
+      HOP_PROJECT_NAME: Jade-Extrator
+      HOP_PROJECT_FOLDER: /files/jade-extrator
+      HOP_LOG_LEVEL: Basic
+      HOP_SERVER_USER: ${HOP_SERVER_USER:-cluster}
+      # A imagem lê HOP_SERVER_PASS; o ETL usa HOP_SERVER_PASSWORD.
+      HOP_SERVER_PASS: ${HOP_SERVER_PASSWORD:-cluster}
+      HOP_SERVER_PORT: "8080"
+      # Execuções esquecidas saem da memória do servidor após 24h.
+      HOP_SERVER_MAX_OBJECT_TIMEOUT: "1440"
+    volumes:
+      # Pasta fixa preenchida pelo ETL antes de cada hop_index. Precisa
+      # existir antes do `up` (senão o Docker a cria como root).
+      - ${STORAGE_PATH:-./storage}/xml/hop_input:/files/jade-extrator/datasets/lattes_xml
+    ports:
+      # Publicado só em loopback: usado pelo ETL rodando via Poetry.
+      - "127.0.0.1:${HOP_SERVER_PORT:-8080}:8080"
+    networks:
+      - simcc-network
+    restart: unless-stopped
+
+  # API do ETL em container (opcional; suba com
+  # `docker compose --profile etl up -d etl`).
   etl:
     build: .
     image: simcc-etl:latest
     container_name: simcc_etl
     env_file: .env
     environment:
-      STORAGE_DIR: ${HOST_STORAGE_DIR:-/opt/simcc/storage}
-      HOST_STORAGE_DIR: ${HOST_STORAGE_DIR:-/opt/simcc/storage}
-    # Sem `:?` de propósito: a interpolação vale para o arquivo inteiro e
-    # quebraria `docker compose up write_db` sem essas variáveis.
-    # GID do grupo docker do host: `getent group docker | cut -d: -f3`
-    group_add:
-      - "${DOCKER_GID:-999}"
+      STORAGE_DIR: /app/storage
+      HOP_SERVER_URL: http://hop:8080
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ${HOST_STORAGE_DIR:-/opt/simcc/storage}:${HOST_STORAGE_DIR:-/opt/simcc/storage}
+      - ${STORAGE_PATH:-./storage}:/app/storage
     ports:
       - "127.0.0.1:${ETL_PORT:-8001}:8000"
     networks:
       - simcc-network
+    depends_on:
+      - hop
     profiles:
       - etl
     restart: unless-stopped

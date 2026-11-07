@@ -1,9 +1,25 @@
-import os
-from pathlib import Path
+"""Execução dos workflows do Apache Hop via Hop Server (container long-lived).
 
-import docker
-from docker.errors import DockerException
-from requests.exceptions import RequestException
+O ETL não cria containers: chama a API REST do Hop Server
+(`/hop/execWorkflow`), que roda o workflow de forma síncrona. Como esse
+endpoint responde `OK` mesmo quando o workflow termina com erro e não devolve
+o id da execução, o resultado real é obtido em `/hop/status` +
+`/hop/workflowStatus` (status final e log), e a execução é removida do
+servidor ao final (`/hop/removeWorkflow`).
+
+Os XMLs do Lattes chegam ao Hop por um volume fixo: `STORAGE_DIR/xml/
+hop_input` é montado em `datasets/lattes_xml` no serviço `hop`. Antes de cada
+`hop_index`, o ETL preenche essa pasta com hardlinks dos XMLs selecionados.
+"""
+
+import base64
+import gzip
+import os
+import shutil
+import xml.etree.ElementTree as ET
+from pathlib import Path, PurePosixPath
+
+import httpx
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -13,157 +29,258 @@ from simcc_etl.core.settings import Settings
 
 logger = get_logger('simcc_etl.routines.extract_lattes_hop')
 
-HOP_XML_BIND = '/files/jade-extrator/datasets/lattes_xml'
+CONNECT_TIMEOUT = 10.0
 
 
-def _docker_client() -> docker.DockerClient:
-    """Cria o cliente Docker com mensagem de erro acionável em pt-BR."""
+class HopServerError(RuntimeError):
+    """Falha de comunicação com o Hop Server ou de execução de workflow."""
+
+
+def _is_fatal_log_line(line: str) -> bool:
+    # Ignora 'ERROR: DUP', emitido pelo transform Unique rows sem ser falha.
+    if 'ERROR: DUP' in line:
+        return False
+    return (
+        ' - ERROR' in line
+        or line.startswith('ERROR')
+        or 'Workflow execution failed' in line
+        or 'result=[false]' in line
+    )
+
+
+def _decode_log(raw: str | None) -> str:
+    """Decodifica o `logging_string` do Hop (CDATA com base64 + gzip)."""
+    if not raw:
+        return ''
+    payload = raw.strip()
+    if payload.startswith('<![CDATA[') and payload.endswith(']]>'):
+        payload = payload[len('<![CDATA[') : -len(']]>')]
+    if not payload:
+        return ''
     try:
-        client = docker.from_env()
-        client.ping()
-    except (DockerException, RequestException, OSError) as exc:
-        raise RuntimeError(
-            'Não foi possível acessar o daemon Docker para disparar o '
-            'Apache Hop. Se o ETL roda em container, monte o socket '
-            '(/var/run/docker.sock:/var/run/docker.sock) e adicione o '
-            'GID do grupo docker do host ao serviço (group_add: '
-            '["${DOCKER_GID}"], obtido com `getent group docker | cut -d: '
-            '-f3`). Fora de container, verifique se o Docker está ativo '
-            f'e se o usuário pertence ao grupo docker. Detalhe: {exc}'
-        ) from exc
-    return client
-
-
-def _ensure_xml_dir(xml_dir: Path) -> None:
-    """Falha se a pasta de XMLs não existir ou estiver vazia."""
-    if not xml_dir.is_dir():
-        raise RuntimeError(
-            f'Pasta de XMLs do Lattes não encontrada: {xml_dir}. '
-            'Execute a coleta (soap_lattes) antes do hop_index ou '
-            'verifique STORAGE_DIR.'
+        return gzip.decompress(base64.b64decode(payload)).decode(
+            'utf-8', errors='replace'
         )
-    if not any(xml_dir.iterdir()):
-        raise RuntimeError(
-            f'Pasta de XMLs do Lattes está vazia: {xml_dir}. '
-            'Execute a coleta (soap_lattes) antes do hop_index.'
+    except (ValueError, OSError):
+        return payload
+
+
+class HopServerClient:
+    """Cliente mínimo da API REST do Hop Server."""
+
+    def __init__(self, settings: Settings, http: httpx.Client | None = None):
+        self.base_url = settings.HOP_SERVER_URL.rstrip('/') + '/hop'
+        self.http = http or httpx.Client(
+            auth=(settings.HOP_SERVER_USER, settings.HOP_SERVER_PASSWORD),
+            timeout=httpx.Timeout(
+                CONNECT_TIMEOUT, read=settings.HOP_SERVER_TIMEOUT
+            ),
         )
 
+    def close(self) -> None:
+        self.http.close()
 
-def _host_path(local_path: Path, settings: Settings) -> str:
-    """Traduz um caminho visto pelo ETL para o caminho no host do Docker.
+    def _get(self, path: str, params: dict | None = None) -> httpx.Response:
+        url = f'{self.base_url}/{path}/'
+        try:
+            response = self.http.get(url, params=params)
+        except httpx.TimeoutException as exc:
+            raise HopServerError(
+                f'Tempo esgotado aguardando o Hop Server em {url}. O '
+                'workflow pode continuar rodando no servidor; aumente '
+                'HOP_SERVER_TIMEOUT se a execução for legitimamente longa.'
+            ) from exc
+        except httpx.TransportError as exc:
+            raise HopServerError(
+                f'Hop Server inacessível em {self.base_url}. Suba o serviço '
+                '`hop` (docker compose up -d hop) e confira HOP_SERVER_URL '
+                '(http://localhost:8080 fora de container; http://hop:8080 '
+                f'na rede simcc-network). Detalhe: {exc}'
+            ) from exc
+        if response.status_code == httpx.codes.UNAUTHORIZED:
+            raise HopServerError(
+                'Hop Server recusou as credenciais (HTTP 401). '
+                'HOP_SERVER_USER/HOP_SERVER_PASSWORD do ETL devem ser iguais '
+                'a HOP_SERVER_USER/HOP_SERVER_PASS do serviço `hop`.'
+            )
+        return response
 
-    O bind mount é resolvido pelo daemon Docker (no host), não pelo processo
-    do ETL. Sem HOST_STORAGE_DIR, assume-se que o ETL roda no próprio host e
-    o caminho local é usado diretamente.
-    """
-    if settings.HOST_STORAGE_DIR is None:
-        return str(local_path.resolve())
+    def list_workflows(self) -> list[dict]:
+        response = self._get('status', {'xml': 'Y'})
+        response.raise_for_status()
+        root = ET.fromstring(response.content)
+        return [
+            {
+                'name': item.findtext('workflowname', ''),
+                'id': item.findtext('id', ''),
+                'status': item.findtext('status_desc', ''),
+            }
+            for item in root.iter('workflow-status')
+        ]
 
-    host_root = settings.HOST_STORAGE_DIR
-    if not host_root.is_absolute():
-        raise RuntimeError(
-            f'HOST_STORAGE_DIR deve ser um caminho absoluto no host '
-            f'(recebido: {host_root}).'
+    def exec_workflow(self, workflow: str, variables: dict[str, str]) -> str:
+        """Executa o workflow (bloqueante) e devolve a mensagem do servidor."""
+        params = {'workflow': workflow, 'level': 'Basic', **variables}
+        response = self._get('execWorkflow', params)
+        try:
+            root = ET.fromstring(response.content)
+            result = root.findtext('result', '')
+            message = root.findtext('message', '') or ''
+        except ET.ParseError:
+            result, message = '', response.text
+        if response.status_code != httpx.codes.OK or result != 'OK':
+            raise HopServerError(
+                f'Hop Server não executou {workflow} '
+                f'(HTTP {response.status_code}): {message.strip()[:2000]}'
+            )
+        return message
+
+    def workflow_status(self, name: str, workflow_id: str) -> dict:
+        response = self._get(
+            'workflowStatus', {'name': name, 'id': workflow_id, 'xml': 'Y'}
         )
+        response.raise_for_status()
+        root = ET.fromstring(response.content)
+        return {
+            'status': root.findtext('status_desc', ''),
+            'error': root.findtext('error_desc', '') or '',
+            'log': _decode_log(root.findtext('logging_string')),
+        }
 
-    # abspath (sem seguir symlinks): o host não enxerga links internos do
-    # container, apenas a mesma árvore montada em STORAGE_DIR.
-    storage_root = Path(os.path.abspath(settings.STORAGE_DIR))
-    absolute = Path(os.path.abspath(local_path))
-    try:
-        relative = absolute.relative_to(storage_root)
-    except ValueError as exc:
-        raise RuntimeError(
-            f'O caminho {absolute} está fora de STORAGE_DIR '
-            f'({storage_root}); não é possível traduzi-lo com '
-            'HOST_STORAGE_DIR.'
-        ) from exc
-    return str(host_root / relative)
+    def remove_workflow(self, name: str, workflow_id: str) -> None:
+        try:
+            self._get('removeWorkflow', {'name': name, 'id': workflow_id})
+        except HopServerError as exc:
+            logger.warning(
+                'Falha ao remover execução do Hop Server',
+                workflow=name,
+                id=workflow_id,
+                error=str(exc),
+            )
 
 
 def _run_hop_workflow(
     workflow_path: str,
-    xml_mount_path: Path | None = None,
+    client: HopServerClient | None = None,
 ) -> Stats:
     settings = Settings()
-
-    volumes = None
-    if xml_mount_path is not None:
-        _ensure_xml_dir(xml_mount_path)
-        volumes = {
-            _host_path(xml_mount_path, settings): {
-                'bind': HOP_XML_BIND,
-                'mode': 'rw',
-            }
-        }
-
-    client = _docker_client()
-
-    environment = {
-        'HOP_RUN_CONFIG': 'local',
-        'HOP_LOG_LEVEL': 'Basic',
-        'HOP_PROJECT_NAME': 'Jade-Extrator',
-        'HOP_PROJECT_FOLDER': '/files/jade-extrator',
-        'HOP_FILE_PATH': f'/files/jade-extrator/{workflow_path}',
-        'HOP_RUN_PARAMETERS': (
-            f'DATABASE_URL={settings.HOP_WRITE_JDBC_URL},'
-            f'ADMIN_DATABASE_URL={settings.HOP_ADMIN_JDBC_URL}'
-        ),
+    own_client = client is None
+    client = client or HopServerClient(settings)
+    workflow_name = PurePosixPath(workflow_path).stem
+    variables = {
         'DATABASE_URL': settings.HOP_WRITE_JDBC_URL,
         'ADMIN_DATABASE_URL': settings.HOP_ADMIN_JDBC_URL,
     }
 
-    logger.info(
-        f'Disparando container Apache Hop para workflow: {workflow_path}',
-        workflow=workflow_path,
-        image=settings.HOP_IMAGE,
-        volumes=volumes,
-    )
+    try:
+        # Também valida conectividade/credenciais antes da execução longa.
+        known_ids = {wf['id'] for wf in client.list_workflows()}
 
-    container = client.containers.run(
-        image=settings.HOP_IMAGE,
-        environment=environment,
-        volumes=volumes,
-        network=settings.DOCKER_NETWORK,
-        detach=True,
-    )
+        logger.info(
+            f'Executando workflow no Hop Server: {workflow_path}',
+            workflow=workflow_path,
+            hop_server=client.base_url,
+        )
+        client.exec_workflow(f'${{PROJECT_HOME}}/{workflow_path}', variables)
+
+        # execWorkflow não devolve o id: identifica a execução recém-criada.
+        # O advisory lock do ETL garante uma execução por vez.
+        new_runs = [
+            wf
+            for wf in client.list_workflows()
+            if wf['id'] not in known_ids and wf['name'] == workflow_name
+        ]
+        if not new_runs:
+            raise HopServerError(
+                f'Execução de {workflow_path} não encontrada em /hop/status '
+                'após execWorkflow; não é possível confirmar o resultado.'
+            )
+        run = new_runs[-1]
+
+        try:
+            status = client.workflow_status(run['name'], run['id'])
+        finally:
+            client.remove_workflow(run['name'], run['id'])
+    finally:
+        if own_client:
+            client.close()
 
     has_fatal_error = False
-    try:
-        for raw_line in container.logs(stream=True, follow=True):
-            line = raw_line.decode('utf-8', errors='replace').strip()
-            if not line:
-                continue
+    for raw_line in status['log'].splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if _is_fatal_log_line(line):
+            has_fatal_error = True
+            logger.error('hop.log', message=line)
+        else:
+            logger.info('hop.log', message=line)
 
-            # Detecta erros críticos no log do Hop (ignorando 'ERROR: DUP'
-            # do transform Unique rows)
-            is_dup_error = 'ERROR: DUP' in line
-            if not is_dup_error and (
-                ' - ERROR' in line
-                or line.startswith('ERROR')
-                or 'Workflow execution failed' in line
-                or 'result=[false]' in line
-            ):
-                has_fatal_error = True
-                logger.error('hop.log', message=line)
-            else:
-                logger.info('hop.log', message=line)
+    # Sucesso é exatamente 'Finished'; falhas aparecem como
+    # 'Finished (with errors)' ou 'Stopped (with errors)'.
+    status_desc = status['status']
+    if status_desc != 'Finished' or has_fatal_error:
+        raise HopServerError(
+            f'Workflow do Apache Hop ({workflow_path}) falhou '
+            f'(status={status_desc!r}, fatal_error={has_fatal_error}'
+            f'{", erro=" + status["error"] if status["error"] else ""})'
+        )
 
-        result = container.wait()
-        exit_code = result.get('StatusCode', 1)
+    return Stats(found=1, succeeded=1, failed=0)
 
-        if exit_code != 0 or has_fatal_error:
-            raise RuntimeError(
-                f'Workflow do Apache Hop ({workflow_path}) falhou '
-                f'(exit_code={exit_code}, fatal_error={has_fatal_error})'
-            )
 
-        return Stats(found=1, succeeded=1, failed=0)
-    finally:
+def _xml_files(directory: Path) -> list[Path]:
+    if not directory.is_dir():
+        return []
+    return [
+        entry
+        for entry in directory.iterdir()
+        if entry.is_file() and entry.name.endswith('.xml')
+    ]
+
+
+def _stage_hop_input(source: Path, target: Path) -> int:
+    """Espelha os XMLs de `source` em `target` (pasta lida pelo Hop).
+
+    Usa hardlinks (instantâneo, sem duplicar disco) e cai para cópia quando
+    origem e destino estão em sistemas de arquivos diferentes. Esvazia apenas
+    o CONTEÚDO de `target`: recriar a pasta deixaria órfão o bind mount do
+    serviço `hop`.
+    """
+    if not source.is_dir():
+        raise RuntimeError(
+            f'Pasta de XMLs do Lattes não encontrada: {source}. '
+            'Execute a coleta (soap_lattes) antes do hop_index ou '
+            'verifique STORAGE_DIR.'
+        )
+    files = _xml_files(source)
+    if not files:
+        raise RuntimeError(
+            f'Pasta de XMLs do Lattes está vazia: {source}. '
+            'Execute a coleta (soap_lattes) antes do hop_index.'
+        )
+
+    target.mkdir(parents=True, exist_ok=True)
+    for entry in target.iterdir():
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
+
+    for xml_file in files:
+        destination = target / xml_file.name
         try:
-            container.remove(force=True)
-        except Exception:
-            pass
+            os.link(xml_file, destination)
+        except OSError:
+            shutil.copy2(xml_file, destination)
+
+    logger.info(
+        'XMLs preparados para o Hop Server',
+        source=str(source),
+        target=str(target),
+        files=len(files),
+    )
+    return len(files)
 
 
 def is_database_seeded(session: Session) -> bool:
@@ -209,15 +326,11 @@ def run_index(
 ) -> Stats:
     """Executa o workflow principal de extração de XMLs (Index.hwf)."""
     settings = Settings()
-    # Se houver filtro de IDs e a pasta run_current tiver arquivos, monta ela
-    mount_dir = settings.xml_run_path
-    if (
-        not lattes_ids
-        or not mount_dir.exists()
-        or not any(mount_dir.iterdir())
-    ):
-        mount_dir = settings.xml_current_path
+    # Com filtro de IDs e run_current populada, processa só ela; senão,
+    # processa o acervo completo (current).
+    source = settings.xml_run_path
+    if not lattes_ids or not _xml_files(source):
+        source = settings.xml_current_path
 
-    # _run_hop_workflow valida a pasta (existe e não vazia) e traduz o
-    # caminho para o host via HOST_STORAGE_DIR quando definido.
-    return _run_hop_workflow('workflows/Index.hwf', xml_mount_path=mount_dir)
+    _stage_hop_input(source, settings.xml_hop_input_path)
+    return _run_hop_workflow('workflows/Index.hwf')
