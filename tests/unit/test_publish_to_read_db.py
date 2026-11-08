@@ -1,20 +1,83 @@
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from simcc_etl.routines.publish_to_read_db import (
-    SEARCH_MATERIALIZED_VIEWS,
+    PublishResult,
     bump_redis_cache,
-    copy_tables_to_read_db,
-    refresh_materialized_views,
+    compare_schemas,
+    mview_creation_order,
+    retarget_fk_def,
+    retarget_index_def,
     run,
 )
 
+STAGING = 'simcc_publish_staging'
 
-def test_copy_tables_identical_dsn():
-    copied = copy_tables_to_read_db(
-        'postgresql://test:test@localhost:5432/db',
-        'postgresql://test:test@localhost:5432/db',
+
+def test_retarget_index_def_moves_table_reference_only():
+    indexdef = (
+        'CREATE INDEX idx_title ON public.article USING gin '
+        '(public.f_unaccent(title) public.gin_trgm_ops)'
     )
-    assert copied == 0
+    assert retarget_index_def(indexdef, STAGING) == (
+        'CREATE INDEX idx_title ON "simcc_publish_staging".article USING gin '
+        '(public.f_unaccent(title) public.gin_trgm_ops)'
+    )
+
+
+def test_retarget_index_def_unique_index():
+    indexdef = 'CREATE UNIQUE INDEX uq_code ON public.graduate_program (code)'
+    assert retarget_index_def(indexdef, STAGING).startswith(
+        'CREATE UNIQUE INDEX uq_code ON "simcc_publish_staging".'
+    )
+
+
+def test_retarget_index_def_rejects_unknown_format():
+    with pytest.raises(RuntimeError):
+        retarget_index_def('CREATE INDEX x ON other.t (a)', STAGING)
+
+
+def test_retarget_fk_def_only_for_published_tables():
+    fkdef = (
+        'FOREIGN KEY (researcher_id) REFERENCES public.researcher(id) '
+        'ON DELETE CASCADE'
+    )
+    assert retarget_fk_def(fkdef, STAGING, {'researcher'}) == (
+        'FOREIGN KEY (researcher_id) REFERENCES '
+        '"simcc_publish_staging".researcher(id) ON DELETE CASCADE'
+    )
+    assert retarget_fk_def(fkdef, STAGING, {'other'}) == fkdef
+
+
+def test_mview_creation_order_respects_dependencies():
+    mviews = {'mv_a': '...', 'mv_b': '...', 'mv_c': '...'}
+    deps = {'mv_a': {'mv_b', 'some_table'}, 'mv_b': {'mv_c'}}
+    order = mview_creation_order(mviews, deps)
+    assert order.index('mv_c') < order.index('mv_b') < order.index('mv_a')
+
+
+def test_compare_schemas_identical():
+    tables = {'researcher': [('id', 'uuid'), ('name', 'text')]}
+    assert compare_schemas(tables, tables) == []
+
+
+def test_compare_schemas_reports_drift():
+    write = {
+        'researcher': [('id', 'uuid'), ('name', 'text')],
+        'only_write': [('id', 'uuid')],
+        'etl_runs': [('id', 'uuid')],
+    }
+    read = {
+        'researcher': [('id', 'uuid'), ('name', 'character varying')],
+        'only_read': [('id', 'uuid')],
+    }
+    problems = compare_schemas(write, read)
+    assert 'tabela only_write existe só no write_db' in problems
+    assert 'tabela only_read existe só no read_db' in problems
+    assert any('researcher.name' in p for p in problems)
+    # Tabelas excluídas da publicação não contam como divergência.
+    assert not any('etl_runs' in p for p in problems)
 
 
 def test_bump_redis_cache_success():
@@ -36,39 +99,41 @@ def test_bump_redis_cache_failure():
         assert res is False
 
 
-def test_refresh_materialized_views_success():
-    with patch('psycopg.connect') as mock_connect:
-        mock_conn = MagicMock()
-        mock_conn.__enter__.return_value = mock_conn
-        mock_cur = MagicMock()
-        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
-        mock_connect.return_value = mock_conn
-
-        succeeded, failed = refresh_materialized_views(
-            'postgresql://test:test@localhost:5432/read_db'
-        )
-        assert succeeded == len(SEARCH_MATERIALIZED_VIEWS)
-        assert failed == 0
-
-
-def test_publish_to_read_db_flow():
-    session = MagicMock()
+def test_run_publishes_via_staging(monkeypatch):
+    monkeypatch.setenv('WRITE_DATABASE_URL', 'postgresql://u@w:5432/write')
+    monkeypatch.setenv('READ_DATABASE_URL', 'postgresql://u@r:5432/read')
+    monkeypatch.setenv('REDIS_URL', 'redis://localhost:6379/0')
     with (
         patch(
-            'simcc_etl.routines.publish_to_read_db.copy_tables_to_read_db'
-        ) as mock_copy,
-        patch(
-            'simcc_etl.routines.publish_to_read_db.refresh_materialized_views'
-        ) as mock_refresh,
+            'simcc_etl.routines.publish_to_read_db.publish_via_staging',
+            return_value=PublishResult(tables=81, mviews=15),
+        ) as mock_publish,
         patch(
             'simcc_etl.routines.publish_to_read_db.bump_redis_cache'
         ) as mock_bump,
     ):
-        mock_copy.return_value = 10
-        mock_refresh.return_value = (15, 0)
-        mock_bump.return_value = True
+        stats = run(MagicMock())
 
-        stats = run(session)
-        assert stats.found == 10 + 15
-        assert stats.succeeded == 25
-        assert stats.failed == 0
+    mock_publish.assert_called_once()
+    mock_bump.assert_called_once()
+    assert (stats.found, stats.succeeded, stats.failed) == (96, 96, 0)
+
+
+def test_run_same_database_only_refreshes(monkeypatch):
+    dsn = 'postgresql://u@db:5432/simcc'
+    monkeypatch.setenv('WRITE_DATABASE_URL', dsn)
+    monkeypatch.setenv('READ_DATABASE_URL', dsn)
+    monkeypatch.setenv('REDIS_URL', '')
+    with (
+        patch(
+            'simcc_etl.routines.publish_to_read_db.publish_via_staging'
+        ) as mock_publish,
+        patch(
+            'simcc_etl.routines.publish_to_read_db.refresh_materialized_views',
+            return_value=15,
+        ),
+    ):
+        stats = run(MagicMock())
+
+    mock_publish.assert_not_called()
+    assert stats.succeeded == 15
