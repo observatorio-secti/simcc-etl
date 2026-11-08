@@ -87,16 +87,6 @@ def get_read_engine():
     )
 
 
-@lru_cache(maxsize=1)
-def get_admin_engine():
-    cfg = Settings()
-    return create_engine(
-        cfg.ADMIN_DATABASE_URL,
-        pool_pre_ping=True,
-        future=True,
-    )
-
-
 def get_write_session(engine=None):
     eng = engine or get_write_engine()
     sm = sessionmaker(eng, expire_on_commit=False)

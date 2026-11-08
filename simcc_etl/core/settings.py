@@ -17,9 +17,6 @@ class Settings(BaseSettings):
     READ_DATABASE_URL: str = (
         'postgresql+psycopg://postgres:postgres@localhost:5432/simcc'
     )
-    ADMIN_DATABASE_URL: str = (
-        'postgresql+psycopg://db_user:db_password@localhost:5432/db'
-    )
 
     # Redis URL
     REDIS_URL: str = 'redis://localhost:6379/0'
@@ -66,6 +63,11 @@ class Settings(BaseSettings):
     def xml_hop_input_path(self) -> Path:
         """Pasta fixa lida pelo Hop Server (montada em datasets/lattes_xml)."""
         return self.STORAGE_DIR / 'xml' / 'hop_input'
+
+    @property
+    def metadata_dir(self) -> Path:
+        """Pasta para cache/snapshots de metadados exportados pelo admin."""
+        return self.STORAGE_DIR / 'metadata'
 
     @property
     def seed_dir(self) -> Path:

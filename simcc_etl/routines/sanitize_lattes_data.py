@@ -1,13 +1,17 @@
 import json
+from pathlib import Path
 
-from sqlalchemy import Engine, text
+import httpx
+import polars as pl
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from simcc_etl.common import Stats
-from simcc_etl.core.database import get_admin_engine
 from simcc_etl.core.logging import get_logger
+from simcc_etl.core.settings import Settings
 
 logger = get_logger('simcc_etl.routines.sanitize_lattes_data')
+TIMEOUT = 60.0
 
 SQL_STEPS = [
     (
@@ -155,69 +159,71 @@ SQL_STEPS = [
 ]
 
 
+def fetch_admin_metadata_parquet(
+    settings: Settings | None = None,
+) -> dict[str, Path]:
+    """Baixa os 4 arquivos Parquet de metadados do simcc-admin."""
+    if settings is None:
+        settings = Settings()
+
+    metadata_dir = settings.metadata_dir
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+
+    base = f'{settings.ADMIN_API_URL}/academic'
+    endpoints = {
+        'institutions': f'{base}/institutions/export/parquet',
+        'collections': f'{base}/collections/export/parquet',
+        'researcher_institutions': (
+            f'{base}/researchers/institutions/export/parquet'
+        ),
+        'researcher_collections': (
+            f'{base}/researchers/collections/export/parquet'
+        ),
+    }
+
+    headers = {'X-Service-Token': settings.ADMIN_SERVICE_TOKEN}
+    transport = httpx.HTTPTransport(retries=3)
+    saved_paths: dict[str, Path] = {}
+
+    try:
+        with httpx.Client(transport=transport, timeout=TIMEOUT) as client:
+            for name, url in endpoints.items():
+                logger.info(
+                    f'Baixando metadados de {name} do simcc-admin: {url}'
+                )
+                resp = client.get(url, headers=headers)
+                resp.raise_for_status()
+
+                dest_file = metadata_dir / f'{name}.parquet'
+                dest_file.write_bytes(resp.content)
+                saved_paths[name] = dest_file
+    except Exception as e:
+        logger.error(f'Falha ao obter metadados do simcc-admin: {e}')
+        raise RuntimeError(
+            f'Erro ao obter metadados do simcc-admin: {e}'
+        ) from e
+
+    return saved_paths
+
+
 def sync_admin_data(
     write_session: Session,
-    admin_engine: Engine | None = None,
+    settings: Settings | None = None,
 ) -> None:
-    """Sincroniza dados do admin_db para o write_db."""
-    if admin_engine is None:
-        admin_engine = get_admin_engine()
+    """Sincroniza dados do simcc-admin para o write_db via HTTP Parquet."""
+    if settings is None:
+        settings = Settings()
 
     logger.info(
-        'Iniciando sincronização de metadados do admin_db para write_db'
+        'Iniciando sincronização de metadados do simcc-admin para write_db'
     )
 
-    with admin_engine.connect() as admin_conn:
-        admin_institutions = (
-            admin_conn.execute(
-                text(
-                    'SELECT name, acronym FROM academic.institutions '
-                    'WHERE name IS NOT NULL OR acronym IS NOT NULL'
-                )
-            )
-            .mappings()
-            .all()
-        )
+    parquet_paths = fetch_admin_metadata_parquet(settings)
 
-        admin_collections = (
-            admin_conn.execute(
-                text(
-                    'SELECT id, slug, name, description, '
-                    'refresh_interval_days, is_default, created_at '
-                    'FROM academic.collections'
-                )
-            )
-            .mappings()
-            .all()
-        )
-
-        admin_ri_links = (
-            admin_conn.execute(
-                text(
-                    'SELECT DISTINCT r.lattes_id, i.acronym '
-                    'FROM academic.researcher_institutions ri '
-                    'JOIN academic.researchers r ON ri.researcher_id = r.id '
-                    'JOIN academic.institutions i ON ri.institution_id = i.id '
-                    'WHERE r.lattes_id IS NOT NULL AND i.acronym IS NOT NULL'
-                )
-            )
-            .mappings()
-            .all()
-        )
-
-        admin_rc_links = (
-            admin_conn.execute(
-                text(
-                    'SELECT r.lattes_id, rc.collection_id, '
-                    'rc.attributes, rc.created_at '
-                    'FROM academic.researcher_collections rc '
-                    'JOIN academic.researchers r ON rc.researcher_id = r.id '
-                    'WHERE r.lattes_id IS NOT NULL'
-                )
-            )
-            .mappings()
-            .all()
-        )
+    df_inst = pl.read_parquet(parquet_paths['institutions'])
+    df_col = pl.read_parquet(parquet_paths['collections'])
+    df_ri = pl.read_parquet(parquet_paths['researcher_institutions'])
+    df_rc = pl.read_parquet(parquet_paths['researcher_collections'])
 
     batch_size = 5000
 
@@ -236,9 +242,9 @@ def sync_admin_data(
         row['name'].lower(): row['id'] for row in existing_insts if row['name']
     }
 
-    for inst in admin_institutions:
-        name = inst['name']
-        acronym = inst['acronym']
+    for inst in df_inst.iter_rows(named=True):
+        name = inst.get('name')
+        acronym = inst.get('acronym')
         inst_id = (by_acronym.get(acronym) if acronym else None) or (
             by_name.get(name.lower()) if name else None
         )
@@ -260,7 +266,7 @@ def sync_admin_data(
             )
     write_session.commit()
 
-    # b) Coleções: lê academic.collections e garante em public.collection
+    # b) Coleções: lê collections.parquet e garante em public.collection
     write_session.execute(
         text(
             """
@@ -282,7 +288,7 @@ def sync_admin_data(
         text('TRUNCATE TABLE public.researcher_collection CASCADE;')
     )
     write_session.execute(text('DELETE FROM public.collection;'))
-    for col in admin_collections:
+    for col in df_col.iter_rows(named=True):
         write_session.execute(
             text(
                 """
@@ -315,8 +321,9 @@ def sync_admin_data(
 
     # c) Vínculos de Pesquisadores e Instituições
     ri_params = [
-        {'lattes_id': link['lattes_id'], 'acronym': link['acronym']}
-        for link in admin_ri_links
+        {'lattes_id': row['lattes_id'], 'acronym': row['acronym']}
+        for row in df_ri.iter_rows(named=True)
+        if row.get('lattes_id') and row.get('acronym')
     ]
     for i in range(0, len(ri_params), batch_size):
         write_session.execute(
@@ -339,16 +346,17 @@ def sync_admin_data(
     # d) Vínculos de Pesquisadores e Coleções
     rc_params = [
         {
-            'lattes_id': rc['lattes_id'],
-            'collection_id': rc['collection_id'],
+            'lattes_id': row['lattes_id'],
+            'collection_id': row['collection_id'],
             'attributes': (
-                json.dumps(rc['attributes'])
-                if isinstance(rc['attributes'], dict)
-                else (rc['attributes'] or '{}')
+                json.dumps(row['attributes'])
+                if isinstance(row['attributes'], dict)
+                else (row['attributes'] or '{}')
             ),
-            'created_at': rc['created_at'],
+            'created_at': row['created_at'],
         }
-        for rc in admin_rc_links
+        for row in df_rc.iter_rows(named=True)
+        if row.get('lattes_id') and row.get('collection_id')
     ]
     for i in range(0, len(rc_params), batch_size):
         write_session.execute(
@@ -376,10 +384,10 @@ def run(
     session: Session,
     researcher_ids: list[str] | None = None,
     lattes_ids: list[str] | None = None,
-    admin_engine: Engine | None = None,
+    settings: Settings | None = None,
 ) -> Stats:
     """Executa a sanitização pós-Hop e sincronização com admin_db."""
-    sync_admin_data(session, admin_engine=admin_engine)
+    sync_admin_data(session, settings=settings)
 
     count = len(SQL_STEPS)
     logger.info(f'Starting sanitize_lattes_data routine with {count} steps')
