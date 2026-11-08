@@ -51,3 +51,6 @@ logs/
 .vscode/
 *.swp
 *.swo
+
+# Chave e known_hosts do túnel SSH (compose: serviço tunnel)
+secrets/

@@ -15,6 +15,53 @@ services:
       - etl_logs:/app/logs
     ports:
       - "127.0.0.1:${ETL_PORT:-8001}:8000"
+    depends_on:
+      tunnel:
+        condition: service_started
+        required: false
+    restart: unless-stopped
+
+  # Túnel SSH até a máquina do read_db. Ativado com COMPOSE_PROFILES=tunnel.
+  # O ETL conecta em tunnel:5432 (Postgres) e tunnel:6379 (Redis da API);
+  # essas portas existem só na rede interna do compose, sem publicar no host.
+  tunnel:
+    profiles: [tunnel]
+    build:
+      dockerfile_inline: |
+        FROM alpine:3.20
+        RUN apk add --no-cache autossh openssh-client
+    image: simcc-etl-tunnel:latest
+    environment:
+      AUTOSSH_GATETIME: "0"
+    command:
+      - autossh
+      - -M
+      - "0"
+      - -N
+      - -i
+      - /run/secrets/etl_tunnel_key
+      - -o
+      - IdentitiesOnly=yes
+      - -o
+      - BatchMode=yes
+      - -o
+      - UserKnownHostsFile=/run/secrets/known_hosts
+      - -o
+      - StrictHostKeyChecking=yes
+      - -o
+      - ServerAliveInterval=15
+      - -o
+      - ServerAliveCountMax=3
+      - -o
+      - ExitOnForwardFailure=yes
+      - -L
+      - 0.0.0.0:5432:localhost:${TUNNEL_REMOTE_PG_PORT:-5424}
+      - -L
+      - 0.0.0.0:6379:localhost:${TUNNEL_REMOTE_REDIS_PORT:-3025}
+      - ${TUNNEL_SSH_USER:-etl-tunnel}@${TUNNEL_SSH_HOST:-defina-TUNNEL_SSH_HOST}
+    volumes:
+      - ./secrets/etl_tunnel_key:/run/secrets/etl_tunnel_key:ro
+      - ./secrets/known_hosts:/run/secrets/known_hosts:ro
     restart: unless-stopped
 
 volumes:
