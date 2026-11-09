@@ -63,6 +63,11 @@ SERVER_SESSION_OPTIONS = (
     '-c idle_in_transaction_session_timeout=15min'
 )
 
+BUILD_SESSION_SETTINGS = (
+    'max_parallel_workers_per_gather',
+    'max_parallel_maintenance_workers',
+)
+
 SWAP_LOCK_TIMEOUT = '30s'
 SWAP_STATEMENT_TIMEOUT = '5min'
 SWAP_ATTEMPTS = 3
@@ -385,6 +390,12 @@ def _build_staging(w_conn, r_conn, cat: ReadCatalog) -> None:
         return sql.SQL('{}.{}').format(staging, sql.Identifier(name))
 
     with r_conn.transaction(), r_conn.cursor() as cur:
+        # Sem workers paralelos na montagem: eles trocam dados por memória
+        # compartilhada (/dev/shm), que em containers Docker tem 64 MB por
+        # padrão e estoura na criação das MVs. Vale só para esta transação.
+        for setting in BUILD_SESSION_SETTINGS:
+            cur.execute("SELECT set_config(%s, '0', true)", (setting,))
+
         cur.execute(
             sql.SQL('DROP SCHEMA IF EXISTS {} CASCADE').format(staging)
         )
