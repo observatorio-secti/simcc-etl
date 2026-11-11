@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     OPENALEX_API_KEY: str | None = None
     OPENALEX_BATCH_COMMIT_SIZE: int = 50
 
+    # Open DGP API (ODA) - Grupos de Pesquisa
+    ODA_API_URL: str = 'https://oda.vertb.com.br'
+    ODA_SYNC_INTERVAL_DAYS: int = 7
+
     @property
     def xml_current_path(self) -> Path:
         return self.STORAGE_DIR / 'xml' / 'current'

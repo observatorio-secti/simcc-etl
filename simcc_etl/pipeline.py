@@ -89,6 +89,7 @@ DEFAULT_ROUTINES: list[str] = [
     'import_capes_researchers',
     'sanitize_lattes_data',
     'aggregate_researcher_production',
+    'export_oda_research_groups',
     'calculate_production_index',
     'classify_researchers',
     'build_search_dictionary',
