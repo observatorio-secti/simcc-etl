@@ -14,14 +14,7 @@ def test_root_redirect():
         status.HTTP_307_TEMPORARY_REDIRECT,
         status.HTTP_302_FOUND,
     }
-    assert response.headers['location'] == '/dashboard'
-
-
-def test_dashboard_html_view():
-    response = client.get('/dashboard')
-    assert response.status_code == status.HTTP_200_OK
-    assert 'text/html' in response.headers['content-type']
-    assert 'SimCC ETL Monitor' in response.text
+    assert response.headers['location'] == '/docs'
 
 
 def test_dashboard_api_runs():

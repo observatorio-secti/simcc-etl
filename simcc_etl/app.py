@@ -43,7 +43,7 @@ app.include_router(router)
 
 @app.get('/', include_in_schema=False)
 def root_redirect():
-    return RedirectResponse(url='/dashboard')
+    return RedirectResponse(url='/docs')
 
 
 @app.get('/health', tags=['Health'])

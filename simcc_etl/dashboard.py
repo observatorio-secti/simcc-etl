@@ -6,17 +6,13 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, status
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 
 from simcc_etl.core.database import EtlRun, get_write_session
 from simcc_etl.core.settings import Settings
 
 dashboard_router = APIRouter(prefix='/dashboard', tags=['Dashboard'])
-
-TEMPLATE_PATH = (
-    Path(__file__).resolve().parent / 'templates' / 'dashboard.html'
-)
 
 
 def _get_log_dir() -> Path:
@@ -28,15 +24,6 @@ def _get_log_dir() -> Path:
     if pkg_dir.exists():
         return pkg_dir
     return Path.cwd() / cfg_dir
-
-
-def get_dashboard_html() -> str:
-    if TEMPLATE_PATH.exists():
-        return TEMPLATE_PATH.read_text(encoding='utf-8')
-    return (
-        '<!DOCTYPE html><html><body><h1>Dashboard template not found</h1>'
-        '</body></html>'
-    )
 
 
 def _parse_run_from_file(file_path: Path) -> dict[str, Any]:
@@ -193,13 +180,6 @@ def _get_runs_from_db(limit: int = 50) -> list[dict[str, Any]] | None:
             session.close()
     except Exception:
         return None
-
-
-@dashboard_router.get('', response_class=HTMLResponse)
-@dashboard_router.get('/', response_class=HTMLResponse)
-def dashboard_view() -> HTMLResponse:
-    """Retorna a interface visual do monitor de execuções e logs."""
-    return HTMLResponse(content=get_dashboard_html())
 
 
 @dashboard_router.get('/api/runs')
