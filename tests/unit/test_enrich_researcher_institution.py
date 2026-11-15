@@ -1,7 +1,6 @@
 from unittest.mock import MagicMock
 
 import pytest
-
 from simcc_etl.core.settings import Settings
 from simcc_etl.routines import enrich_researcher_institution as eri
 
@@ -41,18 +40,29 @@ def test_reference_files_resolve_real_ba_ceps_and_territories():
     assert territories['BARREIRAS'] == 'BACIA DO RIO GRANDE'
     assert territories['SANTOAMARO'] == 'RECÔNCAVO'
 
+    packaged = {p.name for p in eri.DEFAULT_RESEARCHERS_DIR.glob('*.csv')}
+    assert {'ebmsp.csv', 'ufob.csv', 'ufrb.csv'}.issubset(packaged)
 
-def test_missing_reference_files_raise_file_not_found(tmp_path):
+
+def test_missing_reference_files_raise_file_not_found(tmp_path, monkeypatch):
     session = MagicMock()
-    with pytest.raises(FileNotFoundError):
-        eri.run(
-            session,
-            cep_ranges_path=tmp_path / 'missing_cep.csv',
+    with monkeypatch.context() as m:
+        m.setattr(eri, 'DEFAULT_CEP_RANGES_PATH', tmp_path / 'missing_cep.csv')
+        with pytest.raises(FileNotFoundError):
+            eri.run(session, settings=Settings(STORAGE_DIR=tmp_path))
+
+    with monkeypatch.context() as m:
+        m.setattr(
+            eri, 'DEFAULT_TERRITORIES_PATH', tmp_path / 'missing_terr.csv'
         )
+        with pytest.raises(FileNotFoundError):
+            eri.run(session, settings=Settings(STORAGE_DIR=tmp_path))
+
     with pytest.raises(FileNotFoundError):
         eri.run(
             session,
-            territories_path=tmp_path / 'missing_terr.csv',
+            settings=Settings(STORAGE_DIR=tmp_path),
+            researchers_dir=tmp_path / 'empty_researchers',
         )
 
 
@@ -106,7 +116,9 @@ def test_run_enriches_all_three_csv_formats_and_extensible_fourth(tmp_path):
     session = _mock_session_with_db_maps()
     settings = Settings(STORAGE_DIR=tmp_path)
 
-    stats = eri.run(session, settings=settings)
+    stats = eri.run(
+        session, settings=settings, researchers_dir=researchers_dir
+    )
 
     assert stats.found == 4
     assert stats.succeeded == 4
@@ -162,7 +174,11 @@ def test_register_institution_parser_allows_custom_override(tmp_path):
     eri.register_institution_parser('UESC', _custom_uesc)
     try:
         session = _mock_session_with_db_maps()
-        stats = eri.run(session, settings=Settings(STORAGE_DIR=tmp_path))
+        stats = eri.run(
+            session,
+            settings=Settings(STORAGE_DIR=tmp_path),
+            researchers_dir=researchers_dir,
+        )
         assert stats.succeeded == 1
         _, update_params = session.execute.call_args_list[2].args
         assert update_params[0]['workload'] == 40.0

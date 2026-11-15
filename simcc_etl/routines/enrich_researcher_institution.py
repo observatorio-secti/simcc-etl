@@ -23,6 +23,7 @@ logger = get_logger('simcc_etl.routines.enrich_researcher_institution')
 DATA_DIR = Path(__file__).resolve().parent.parent / 'data'
 DEFAULT_CEP_RANGES_PATH = DATA_DIR / 'cep_ranges.csv'
 DEFAULT_TERRITORIES_PATH = DATA_DIR / 'identity_territories.csv'
+DEFAULT_RESEARCHERS_DIR = DATA_DIR / 'researchers'
 
 BATCH_SIZE = 5000
 WORKLOAD_MIN_HOURS = 0.0
@@ -255,32 +256,41 @@ def _load_city_ids(session: Session) -> dict[str, str]:
     }
 
 
+def _collect_csv_files(
+    researchers_dir: Path, extra_dir: Path | None = None
+) -> list[Path]:
+    csv_by_name: dict[str, Path] = {}
+    if researchers_dir.exists():
+        for path in sorted(researchers_dir.glob('*.csv')):
+            csv_by_name[path.name] = path
+    if extra_dir and extra_dir.exists():
+        for path in sorted(extra_dir.glob('*.csv')):
+            csv_by_name[path.name] = path
+
+    if not csv_by_name:
+        raise FileNotFoundError(
+            f'Nenhum CSV de pesquisadores encontrado em {researchers_dir}'
+        )
+    return [csv_by_name[name] for name in sorted(csv_by_name)]
+
+
 def run(
     session: Session,
     *,
     lattes_ids: list[str] | None = None,
     settings: Settings | None = None,
-    cep_ranges_path: Path = DEFAULT_CEP_RANGES_PATH,
-    territories_path: Path = DEFAULT_TERRITORIES_PATH,
+    researchers_dir: Path = DEFAULT_RESEARCHERS_DIR,
 ) -> Stats:
     """Enriquece researcher_institution (território, carga e cidade)."""
     if settings is None:
         settings = Settings()
 
-    cep_lookup = CepLookup(cep_ranges_path)
-    territories = load_identity_territories(territories_path)
-
-    researchers_dir = settings.seed_researchers_dir
-    if not researchers_dir.exists():
-        logger.warning(
-            f'Diretório de pesquisadores não encontrado: {researchers_dir}'
-        )
-        return Stats(found=0, succeeded=0, failed=0)
-
-    csv_files = sorted(researchers_dir.glob('*.csv'))
-    if not csv_files:
-        logger.warning(f'Nenhum CSV encontrado em {researchers_dir}')
-        return Stats(found=0, succeeded=0, failed=0)
+    cep_lookup = CepLookup(DEFAULT_CEP_RANGES_PATH)
+    territories = load_identity_territories(DEFAULT_TERRITORIES_PATH)
+    csv_files = _collect_csv_files(
+        researchers_dir,
+        extra_dir=settings.seed_researchers_dir,
+    )
 
     institution_ids = _load_institution_ids(session)
     city_ids = _load_city_ids(session)
