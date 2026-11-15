@@ -76,3 +76,8 @@ class Settings(BaseSettings):
     @property
     def seed_dir(self) -> Path:
         return self.STORAGE_DIR / 'seed'
+
+    @property
+    def seed_researchers_dir(self) -> Path:
+        """Pasta com CSVs de metadados de pesquisadores por instituição."""
+        return self.seed_dir / 'researchers'

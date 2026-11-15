@@ -25,6 +25,7 @@ from simcc_etl.routines import (
     classify_article_themes,
     classify_researchers,
     enrich_from_openalex,
+    enrich_researcher_institution,
     export_oda_research_groups,
     extract_lattes_hop,
     import_capes_programs,
@@ -53,6 +54,7 @@ ROUTINES: dict[str, Callable[..., Stats]] = {
     'soap_lattes': soap_lattes.run,
     'hop_index': extract_lattes_hop.run_index,
     'sanitize_lattes_data': sanitize_lattes_data.run,
+    'enrich_researcher_institution': enrich_researcher_institution.run,
     'aggregate_researcher_production': aggregate_researcher_production.run,
     'calculate_researcher_indprod': (
         calculate_production_index.run_researcher_indprod
@@ -88,6 +90,7 @@ DEFAULT_ROUTINES: list[str] = [
     'import_capes_ratings',
     'import_capes_researchers',
     'sanitize_lattes_data',
+    'enrich_researcher_institution',
     'aggregate_researcher_production',
     'export_oda_research_groups',
     'calculate_production_index',
