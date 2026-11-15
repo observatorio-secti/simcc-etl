@@ -1,5 +1,8 @@
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
+
+import httpx
+import pytest
 
 from simcc_etl.routines.export_oda_research_groups import (
     _build_record,
@@ -100,3 +103,70 @@ def test_run_skips_when_recent():
         assert stats.found == 0
         assert stats.succeeded == 0
         assert stats.failed == 0
+
+
+def test_should_run_sync_zero_interval_returns_true():
+    session = MagicMock()
+    mock_res = MagicMock()
+    mock_res.scalar.return_value = datetime.now(timezone.utc)
+    session.execute.return_value = mock_res
+
+    assert should_run_sync(session, interval_days=0) is True
+
+
+def test_should_run_sync_sql_avoids_jsonb_question_operator():
+    session = MagicMock()
+    mock_res = MagicMock()
+    mock_res.scalar.return_value = None
+    session.execute.return_value = mock_res
+
+    should_run_sync(session, interval_days=7)
+
+    stmt = session.execute.call_args.args[0]
+    sql_text = str(stmt)
+    assert '?' not in sql_text
+    assert "steps->'export_oda_research_groups'->>'status'" in sql_text
+
+
+def test_run_raises_on_oda_http_502():
+    session = MagicMock()
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(502, request=request)
+    )
+    orig_client = httpx.AsyncClient
+
+    def _mock_client(**kwargs):
+        kwargs['transport'] = transport
+        return orig_client(**kwargs)
+
+    with (
+        patch(
+            'simcc_etl.routines.export_oda_research_groups.httpx.AsyncClient',
+            side_effect=_mock_client,
+        ),
+        pytest.raises(httpx.HTTPStatusError),
+    ):
+        run(session, force=True)
+
+
+def test_run_raises_on_oda_connection_error():
+    session = MagicMock()
+
+    def _raise_connect_error(request):
+        raise httpx.ConnectError('connection refused', request=request)
+
+    transport = httpx.MockTransport(_raise_connect_error)
+    orig_client = httpx.AsyncClient
+
+    def _mock_client(**kwargs):
+        kwargs['transport'] = transport
+        return orig_client(**kwargs)
+
+    with (
+        patch(
+            'simcc_etl.routines.export_oda_research_groups.httpx.AsyncClient',
+            side_effect=_mock_client,
+        ),
+        pytest.raises(httpx.ConnectError),
+    ):
+        run(session, force=True)
