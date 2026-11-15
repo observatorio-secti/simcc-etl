@@ -23,7 +23,7 @@ def should_run_sync(session: Session, interval_days: int = 7) -> bool:
         stmt = text("""
             SELECT started_at FROM public.etl_runs
             WHERE (
-                (steps ? 'export_oda_research_groups' AND (steps->'export_oda_research_groups'->>'status') = 'SUCCEEDED')
+                (steps->'export_oda_research_groups'->>'status') = 'SUCCEEDED'
                 OR (current_routine = 'export_oda_research_groups' AND status = 'SUCCEEDED')
             )
             ORDER BY started_at DESC
@@ -234,34 +234,30 @@ def run(
         return Stats(found=0, succeeded=0, failed=0)
 
     async def _run_async() -> Stats:
-        try:
-            async with httpx.AsyncClient(
-                base_url=settings.ODA_API_URL, timeout=TIMEOUT
-            ) as client:
-                groups = await _fetch_groups(client)
-                found = len(groups)
-                if not groups:
-                    logger.info('Nenhum grupo retornado pela ODA.')
-                    return Stats(found=0, succeeded=0, failed=0)
+        async with httpx.AsyncClient(
+            base_url=settings.ODA_API_URL, timeout=TIMEOUT
+        ) as client:
+            groups = await _fetch_groups(client)
+            found = len(groups)
+            if not groups:
+                logger.info('Nenhum grupo retornado pela ODA.')
+                return Stats(found=0, succeeded=0, failed=0)
 
-                semaphore = asyncio.Semaphore(CONCURRENCY)
-                tasks = [
-                    _fetch_leaders(client, semaphore, g['id']) for g in groups
-                ]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
+            semaphore = asyncio.Semaphore(CONCURRENCY)
+            tasks = [
+                _fetch_leaders(client, semaphore, g['id']) for g in groups
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                records = []
-                for g, res in zip(groups, results, strict=False):
-                    leaders = [] if isinstance(res, Exception) else res
-                    records.append(_build_record(g, leaders))
+            records = []
+            for g, res in zip(groups, results, strict=False):
+                leaders = [] if isinstance(res, Exception) else res
+                records.append(_build_record(g, leaders))
 
-                succeeded, failed = _save_groups_to_database(session, records)
-                logger.info(
-                    f'Sincronização ODA concluída: {succeeded} grupos salvos no banco, {failed} falhas.'
-                )
-                return Stats(found=found, succeeded=succeeded, failed=failed)
-        except Exception as e:
-            logger.warning(f'ODA API unreachable or returned error: {e}')
-            return Stats(found=0, succeeded=0, failed=0)
+            succeeded, failed = _save_groups_to_database(session, records)
+            logger.info(
+                f'Sincronização ODA concluída: {succeeded} grupos salvos no banco, {failed} falhas.'
+            )
+            return Stats(found=found, succeeded=succeeded, failed=failed)
 
     return asyncio.run(_run_async())
