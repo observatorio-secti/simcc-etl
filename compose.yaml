@@ -11,6 +11,7 @@ services:
       HOP_SERVER_PASSWORD: ${HOP_SERVER_PASSWORD:-cluster}
     volumes:
       - etl_storage:/app/storage
+      - ./storage/seed:/app/storage/seed:ro
       - hop_input:/app/storage/xml/hop_input
       - etl_logs:/app/logs
     ports:
