@@ -7,7 +7,7 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy.dialects import postgresql
 
-from simcc_etl.core.database import EtlRun
+from simcc_etl.core.database import ConsistencyReport, EtlRun
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -57,4 +57,17 @@ def test_etl_runs_json_columns_match_orm_jsonb():
 
     for col_name in ('routines', 'lattes_ids', 'steps'):
         orm_type = EtlRun.__table__.c[col_name].type.compile(dialect=dialect)
+        assert final_types.get(col_name) == orm_type.upper() == 'JSONB'
+
+
+def test_consistency_reports_json_columns_match_orm_jsonb():
+    """Migrations e ORM ConsistencyReport devem usar JSONB nas colunas JSON."""
+    ddl = _render_alembic_upgrade_sql()
+    final_types = _extract_final_column_types(ddl, 'consistency_reports')
+    dialect = postgresql.dialect()
+
+    for col_name in ('before', 'after', 'result'):
+        orm_type = ConsistencyReport.__table__.c[col_name].type.compile(
+            dialect=dialect
+        )
         assert final_types.get(col_name) == orm_type.upper() == 'JSONB'

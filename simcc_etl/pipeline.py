@@ -7,6 +7,12 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from simcc_etl.common import Stats
+from simcc_etl.core.consistency import (
+    RoutineExecutionMeta,
+    RoutineOutcome,
+    finish_consistency_reports,
+    start_consistency_reports,
+)
 from simcc_etl.core.database import (
     EtlRun,
     create_etl_tables,
@@ -193,6 +199,15 @@ def run_pipeline(  # noqa: C901, PLR0912, PLR0915
                 routine=routine_name,
             )
             step_start = time.perf_counter()
+            consistency_meta = RoutineExecutionMeta(
+                routine_name=routine_name,
+                etl_run_id=effective_run_id,
+                origin=triggered_by,
+                lattes_ids=lattes_ids,
+            )
+            consistency_ids = start_consistency_reports(
+                engine, consistency_meta
+            )
 
             try:
                 # Executa a função da rotina
@@ -207,6 +222,12 @@ def run_pipeline(  # noqa: C901, PLR0912, PLR0915
                     'failed': stats.failed,
                 }
                 session.commit()
+                finish_consistency_reports(
+                    engine,
+                    consistency_ids,
+                    consistency_meta,
+                    RoutineOutcome(stats=stats, duration_ms=duration_ms),
+                )
                 logger.info(
                     f'Rotina {routine_name} concluída com sucesso',
                     routine=routine_name,
@@ -217,6 +238,12 @@ def run_pipeline(  # noqa: C901, PLR0912, PLR0915
                 )
             except Exception as e:
                 duration_ms = int((time.perf_counter() - step_start) * 1000)
+                finish_consistency_reports(
+                    engine,
+                    consistency_ids,
+                    consistency_meta,
+                    RoutineOutcome(duration_ms=duration_ms, error=str(e)),
+                )
                 logger.error(
                     f'Falha na rotina {routine_name}: {str(e)}',
                     routine=routine_name,
