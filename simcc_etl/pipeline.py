@@ -106,6 +106,11 @@ DEFAULT_ROUTINES: list[str] = [
     'publish_to_read_db',
 ]
 
+# Rotinas cuja falha é registrada no step, mas não interrompe o pipeline.
+NON_BLOCKING_ROUTINES: frozenset[str] = frozenset({
+    'export_oda_research_groups',
+})
+
 
 def get_default_routines() -> list[str]:
     """Retorna a sequência padrão do pipeline diário (exclui setup de seed)."""
@@ -186,9 +191,12 @@ def run_pipeline(  # noqa: C901, PLR0912, PLR0915
             if not fn:
                 err_msg = f'Rotina {routine_name} não encontrada no catálogo.'
                 logger.error(err_msg, routine=routine_name)
-                etl_run.steps[routine_name] = {
-                    'status': 'FAILED',
-                    'error': err_msg,
+                etl_run.steps = {
+                    **(etl_run.steps or {}),
+                    routine_name: {
+                        'status': 'FAILED',
+                        'error': err_msg,
+                    },
                 }
                 session.commit()
                 overall_error = ValueError(err_msg)
@@ -214,14 +222,60 @@ def run_pipeline(  # noqa: C901, PLR0912, PLR0915
                 stats = fn(session, lattes_ids=lattes_ids)
                 duration_ms = int((time.perf_counter() - step_start) * 1000)
 
-                etl_run.steps[routine_name] = {
-                    'status': 'SUCCEEDED',
-                    'duration_ms': duration_ms,
-                    'found': stats.found,
-                    'succeeded': stats.succeeded,
-                    'failed': stats.failed,
+                etl_run.steps = {
+                    **(etl_run.steps or {}),
+                    routine_name: {
+                        'status': 'SUCCEEDED',
+                        'duration_ms': duration_ms,
+                        'found': stats.found,
+                        'succeeded': stats.succeeded,
+                        'failed': stats.failed,
+                    },
                 }
                 session.commit()
+            except Exception as e:
+                duration_ms = int((time.perf_counter() - step_start) * 1000)
+                is_non_blocking = routine_name in NON_BLOCKING_ROUTINES
+                session.rollback()
+                step_payload: dict[str, object] = {
+                    'status': 'FAILED',
+                    'duration_ms': duration_ms,
+                    'error': str(e),
+                }
+                if is_non_blocking:
+                    step_payload['non_blocking'] = True
+                etl_run.steps = {
+                    **(etl_run.steps or {}),
+                    routine_name: step_payload,
+                }
+                session.commit()
+                finish_consistency_reports(
+                    engine,
+                    consistency_ids,
+                    consistency_meta,
+                    RoutineOutcome(duration_ms=duration_ms, error=str(e)),
+                )
+
+                if is_non_blocking:
+                    logger.warning(
+                        f'Falha na rotina não bloqueante {routine_name}: '
+                        f'{str(e)}. Continuando pipeline.',
+                        routine=routine_name,
+                        duration_ms=duration_ms,
+                        error=str(e),
+                        non_blocking=True,
+                    )
+                    continue
+
+                logger.error(
+                    f'Falha na rotina {routine_name}: {str(e)}',
+                    routine=routine_name,
+                    duration_ms=duration_ms,
+                    error=str(e),
+                )
+                overall_error = e
+                break
+            else:
                 finish_consistency_reports(
                     engine,
                     consistency_ids,
@@ -236,28 +290,6 @@ def run_pipeline(  # noqa: C901, PLR0912, PLR0915
                     succeeded=stats.succeeded,
                     failed=stats.failed,
                 )
-            except Exception as e:
-                duration_ms = int((time.perf_counter() - step_start) * 1000)
-                finish_consistency_reports(
-                    engine,
-                    consistency_ids,
-                    consistency_meta,
-                    RoutineOutcome(duration_ms=duration_ms, error=str(e)),
-                )
-                logger.error(
-                    f'Falha na rotina {routine_name}: {str(e)}',
-                    routine=routine_name,
-                    duration_ms=duration_ms,
-                    error=str(e),
-                )
-                etl_run.steps[routine_name] = {
-                    'status': 'FAILED',
-                    'duration_ms': duration_ms,
-                    'error': str(e),
-                }
-                session.commit()
-                overall_error = e
-                break
 
         if overall_error:
             etl_run.status = 'FAILED'
