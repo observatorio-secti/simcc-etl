@@ -41,7 +41,8 @@ coverage.xml
 
 # Storage and logs
 storage/xml/
-storage/seed/
+storage/seed/*
+!storage/seed/*.csv
 storage/openalex/
 logs/
 .env
