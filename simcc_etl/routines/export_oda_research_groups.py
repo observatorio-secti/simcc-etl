@@ -4,6 +4,7 @@ from typing import Any
 
 import httpx
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from simcc_etl.common import Stats
@@ -113,11 +114,45 @@ def _get_researcher_lattes_map(session: Session) -> dict[str, str]:
     return {r['lattes_id'].strip(): r['id'] for r in rows if r['lattes_id']}
 
 
+_SITUATION_PRIORITY = {
+    'CERTIFICADO': 3,
+    'AGUARDANDO_CERTIFICACAO': 2,
+    'EM_PREENCHIMENTO': 1,
+}
+
+
+def _deduplicate_records(
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Remove duplicatas por (name, institution_acronym) mantendo a melhor."""
+    deduped: dict[tuple[str, str], dict[str, Any]] = {}
+    passthrough: list[dict[str, Any]] = []
+
+    def _rank(rec: dict[str, Any]) -> tuple[int, int]:
+        prio = _SITUATION_PRIORITY.get(rec.get('situation') or '', 0)
+        year = rec.get('year') or 0
+        return (prio, year)
+
+    for rec in records:
+        name = rec.get('name')
+        inst = rec.get('institution_acronym')
+        if not name or not inst:
+            passthrough.append(rec)
+            continue
+        key = (name, inst)
+        existing = deduped.get(key)
+        if existing is None or _rank(rec) > _rank(existing):
+            deduped[key] = rec
+
+    return list(deduped.values()) + passthrough
+
+
 def _save_groups_to_database(
     session: Session, records: list[dict[str, Any]]
 ) -> tuple[int, int]:
-    """Salva os grupos e seus líderes nas tabelas research_group e research_group_researcher."""
+    """Salva os grupos e seus líderes nas tabelas de grupos de pesquisa."""
     researcher_map = _get_researcher_lattes_map(session)
+    unique_records = _deduplicate_records(records)
 
     upsert_group_sql = text("""
         INSERT INTO public.research_group (
@@ -142,8 +177,24 @@ def _save_groups_to_database(
         RETURNING id, group_identifier;
     """)
 
+    update_by_name_inst_sql = text("""
+        UPDATE public.research_group SET
+            first_leader = :first_leader,
+            first_leader_id = :first_leader_id,
+            second_leader = :second_leader,
+            second_leader_id = :second_leader_id,
+            area = :area,
+            group_identifier = :group_identifier,
+            year = :year,
+            institution_name = :institution_name
+        WHERE name = :name AND institution = :institution
+        RETURNING id, group_identifier;
+    """)
+
     insert_relation_sql = text("""
-        INSERT INTO public.research_group_researcher (research_group_id, researcher_id)
+        INSERT INTO public.research_group_researcher (
+            research_group_id, researcher_id
+        )
         VALUES (:research_group_id, :researcher_id)
         ON CONFLICT (research_group_id, researcher_id) DO NOTHING;
     """)
@@ -151,7 +202,7 @@ def _save_groups_to_database(
     succeeded = 0
     failed = 0
 
-    for rec in records:
+    for rec in unique_records:
         try:
             leaders = (rec.get('leaders') or [])[:2]
             leaders += [{'name': None, 'lattes_id': None}] * (2 - len(leaders))
@@ -178,28 +229,40 @@ def _save_groups_to_database(
                 'institution_name': rec.get('institution_name'),
             }
 
-            res = session.execute(upsert_group_sql, params).mappings().first()
-            if res and res.get('id'):
-                group_id = res['id']
-                relations = []
-                if first_id:
-                    relations.append({
-                        'research_group_id': group_id,
-                        'researcher_id': first_id,
-                    })
-                if second_id and second_id != first_id:
-                    relations.append({
-                        'research_group_id': group_id,
-                        'researcher_id': second_id,
-                    })
-                if relations:
-                    session.execute(insert_relation_sql, relations)
+            with session.begin_nested():
+                try:
+                    with session.begin_nested():
+                        res = (
+                            session.execute(upsert_group_sql, params)
+                            .mappings()
+                            .first()
+                        )
+                except IntegrityError:
+                    res = (
+                        session.execute(update_by_name_inst_sql, params)
+                        .mappings()
+                        .first()
+                    )
+
+                if res and res.get('id'):
+                    group_id = res['id']
+                    relations = []
+                    if first_id:
+                        relations.append({
+                            'research_group_id': group_id,
+                            'researcher_id': first_id,
+                        })
+                    if second_id and second_id != first_id:
+                        relations.append({
+                            'research_group_id': group_id,
+                            'researcher_id': second_id,
+                        })
+                    if relations:
+                        session.execute(insert_relation_sql, relations)
 
             succeeded += 1
         except Exception as e:
-            logger.error(
-                f"Erro ao salvar grupo {rec.get('name')}: {e}", exc_info=True
-            )
+            logger.error(f"Erro ao salvar grupo {rec.get('name')}: {e}")
             failed += 1
 
     session.commit()

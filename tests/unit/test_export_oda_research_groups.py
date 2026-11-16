@@ -3,9 +3,11 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from simcc_etl.routines.export_oda_research_groups import (
     _build_record,
+    _deduplicate_records,
     _save_groups_to_database,
     run,
     should_run_sync,
@@ -170,3 +172,69 @@ def test_run_raises_on_oda_connection_error():
         pytest.raises(httpx.ConnectError),
     ):
         run(session, force=True)
+
+
+def test_deduplicate_records_prefers_certified_and_latest_year():
+    records = [
+        {
+            'dgp_id': 'dgp-1',
+            'name': 'Grupo Dup',
+            'institution_acronym': 'UEFS',
+            'situation': 'EM_PREENCHIMENTO',
+            'year': 2024,
+        },
+        {
+            'dgp_id': 'dgp-2',
+            'name': 'Grupo Dup',
+            'institution_acronym': 'UEFS',
+            'situation': 'CERTIFICADO',
+            'year': 2015,
+        },
+        {
+            'dgp_id': 'dgp-3',
+            'name': 'Grupo Sem Inst',
+            'institution_acronym': None,
+            'situation': 'CERTIFICADO',
+            'year': 2020,
+        },
+    ]
+
+    deduped = _deduplicate_records(records)
+    assert len(deduped) == 2
+    assert {r['dgp_id'] for r in deduped} == {'dgp-2', 'dgp-3'}
+
+
+def test_save_groups_to_database_falls_back_on_name_institution_conflict():
+    session = MagicMock()
+    res_mock = MagicMock()
+    res_mock.mappings.return_value.all.return_value = []
+
+    fallback_mock = MagicMock()
+    fallback_mock.mappings.return_value.first.return_value = {
+        'id': 'uuid-group-1'
+    }
+
+    session.execute.side_effect = [
+        res_mock,
+        IntegrityError('dup', {}, Exception('uq_research_group_name_institution')),
+        fallback_mock,
+    ]
+
+    records = [
+        {
+            'oda_id': 'oda-1',
+            'dgp_id': 'dgp-new',
+            'name': 'Grupo Existente',
+            'area': 'Agronomia',
+            'year': 2020,
+            'situation': 'CERTIFICADO',
+            'institution_acronym': 'UEFS',
+            'institution_name': 'UEFS',
+            'leaders': [],
+        }
+    ]
+
+    succeeded, failed = _save_groups_to_database(session, records)
+    assert succeeded == 1
+    assert failed == 0
+    assert session.commit.called
