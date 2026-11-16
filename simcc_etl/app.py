@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
+from simcc_etl.consistency_router import consistency_router
 from simcc_etl.core.database import create_etl_tables
 from simcc_etl.core.logging import configure_logging
 from simcc_etl.dashboard import dashboard_router
@@ -39,6 +40,7 @@ app.add_middleware(
 
 app.include_router(dashboard_router)
 app.include_router(router)
+app.include_router(consistency_router)
 
 
 @app.get('/', include_in_schema=False)

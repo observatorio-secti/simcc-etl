@@ -39,6 +39,7 @@ EXCLUDED_TABLES = {
     'alembic_version',
     'alembic_version_etl',
     'etl_runs',
+    'consistency_reports',
 }
 
 REDIS_GENERATION_KEY = 'simcc:v2:search:generation'

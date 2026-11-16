@@ -67,6 +67,7 @@ def test_compare_schemas_reports_drift():
         'researcher': [('id', 'uuid'), ('name', 'text')],
         'only_write': [('id', 'uuid')],
         'etl_runs': [('id', 'uuid')],
+        'consistency_reports': [('id', 'text')],
     }
     read = {
         'researcher': [('id', 'uuid'), ('name', 'character varying')],
@@ -78,6 +79,7 @@ def test_compare_schemas_reports_drift():
     assert any('researcher.name' in p for p in problems)
     # Tabelas excluídas da publicação não contam como divergência.
     assert not any('etl_runs' in p for p in problems)
+    assert not any('consistency_reports' in p for p in problems)
 
 
 def test_bump_redis_cache_success():
