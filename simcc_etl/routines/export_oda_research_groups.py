@@ -14,7 +14,7 @@ logger = get_logger('simcc_etl.routines.export_oda_research_groups')
 
 PAGE_SIZE = 500
 CONCURRENCY = 10
-TIMEOUT = httpx.Timeout(30.0)
+TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
 
 
 def should_run_sync(session: Session, interval_days: int = 7) -> bool:

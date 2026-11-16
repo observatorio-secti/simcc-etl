@@ -4,8 +4,11 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    JSON,
+    CheckConstraint,
     DateTime,
     Float,
+    ForeignKey,
     Integer,
     String,
     Text,
@@ -67,6 +70,60 @@ class ResearchGroupIndProd(Base):
     ind_prod_guidance: Mapped[float] = mapped_column(Float, default=0.0)
 
 
+_JSONB_VARIANT = JSONB().with_variant(JSON(), 'sqlite')
+
+
+class ConsistencyReport(Base):
+    """Stores consistency and freshness reports per routine or manual event."""
+
+    __tablename__ = 'consistency_reports'
+    __table_args__ = (
+        CheckConstraint(
+            "scope = 'simcc'", name='ck_consistency_reports_scope'
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(64), primary_key=True, default=lambda: str(uuid4())
+    )
+    etl_run_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey('etl_runs.id', ondelete='SET NULL'),
+        nullable=True,
+        index=True,
+    )
+    pipeline_log_id: Mapped[str | None] = mapped_column(
+        String(128), unique=True, nullable=True
+    )
+    scope: Mapped[str] = mapped_column(String(20), default='simcc')
+    type: Mapped[str] = mapped_column(String(100), index=True)
+    origin: Mapped[str] = mapped_column(String(32), default='system')
+    coverage: Mapped[str] = mapped_column(String(20), default='FULL')
+    status: Mapped[str] = mapped_column(
+        String(32), default='IN_PROGRESS', index=True
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        index=True,
+    )
+    ended_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    reference_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    before: Mapped[dict[str, Any]] = mapped_column(
+        _JSONB_VARIANT, default=dict
+    )
+    after: Mapped[dict[str, Any] | None] = mapped_column(
+        _JSONB_VARIANT, nullable=True
+    )
+    result: Mapped[dict[str, Any] | None] = mapped_column(
+        _JSONB_VARIANT, nullable=True
+    )
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 @lru_cache(maxsize=1)
 def get_write_engine():
     cfg = Settings()
@@ -101,5 +158,6 @@ def create_etl_tables(engine=None):
         tables=[
             EtlRun.__table__,
             ResearchGroupIndProd.__table__,
+            ConsistencyReport.__table__,
         ],
     )
