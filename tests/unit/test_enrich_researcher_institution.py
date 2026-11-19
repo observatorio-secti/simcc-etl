@@ -56,14 +56,14 @@ def test_missing_reference_files_raise_file_not_found(tmp_path):
         )
 
 
-def _mock_session_with_db_maps():
+def _mock_session_with_db_maps(address_rows=None):
     session = MagicMock()
     inst_result = MagicMock()
     inst_result.mappings.return_value.all.return_value = [
-        {'id': 'inst-ebmsp', 'acronym': 'EBMSP'},
-        {'id': 'inst-ufob', 'acronym': 'UFOB'},
-        {'id': 'inst-ufrb', 'acronym': 'UFRB'},
-        {'id': 'inst-uesc', 'acronym': 'UESC'},
+        {'id': 'inst-ebmsp', 'acronym': 'EBMSP', 'name': 'Escola Bahiana'},
+        {'id': 'inst-ufob', 'acronym': 'UFOB', 'name': 'Universidade Federal do Oeste da Bahia'},
+        {'id': 'inst-ufrb', 'acronym': 'UFRB', 'name': 'Universidade Federal do Recôncavo da Bahia'},
+        {'id': 'inst-uesc', 'acronym': 'UESC', 'name': 'Universidade Estadual de Santa Cruz'},
     ]
     city_result = MagicMock()
     city_result.mappings.return_value.all.return_value = [
@@ -72,8 +72,16 @@ def _mock_session_with_db_maps():
         {'id': 'city-santo-amaro', 'name': 'Santo Amaro'},
         {'id': 'city-ilheus', 'name': 'Ilhéus'},
     ]
-    update_result = MagicMock()
-    session.execute.side_effect = [inst_result, city_result, update_result]
+    addr_result = MagicMock()
+    addr_result.mappings.return_value.all.return_value = address_rows or []
+    write_result = MagicMock()
+    session.execute.side_effect = [
+        inst_result,
+        city_result,
+        write_result,
+        addr_result,
+        write_result,
+    ]
     return session
 
 
@@ -168,3 +176,102 @@ def test_register_institution_parser_allows_custom_override(tmp_path):
         assert update_params[0]['workload'] == 40.0
     finally:
         eri.INSTITUTION_PARSERS.pop('UESC', None)
+
+
+def test_run_enriches_missing_researchers_from_address_cep(tmp_path):
+    address_rows = [
+        # Resolve instituição por nome normalizado e CEP de Salvador
+        {
+            'researcher_id': 'res-1',
+            'lattes_id': '1111111111111111',
+            'cep': '41.150-000',
+            'address_institution': 'Universidade Estadual de Santa Cruz',
+            'researcher_institution_id': None,
+        },
+        # Resolve instituição por sigla e CEP de Barreiras
+        {
+            'researcher_id': 'res-2',
+            'lattes_id': '2222222222222222',
+            'cep': '47810-047',
+            'address_institution': 'ufob',
+            'researcher_institution_id': None,
+        },
+        # Fallback para researcher.institution_id quando address_institution não casa
+        {
+            'researcher_id': 'res-3',
+            'lattes_id': '3333333333333333',
+            'cep': '44200-000',
+            'address_institution': 'Instituição Desconhecida',
+            'researcher_institution_id': 'inst-ufrb',
+        },
+        # Ignorado: sem institution_id resolvido
+        {
+            'researcher_id': 'res-4',
+            'lattes_id': '4444444444444444',
+            'cep': '41.150-000',
+            'address_institution': 'Sem Cadastro',
+            'researcher_institution_id': None,
+        },
+        # Ignorado: CEP inválido / não resolve localização
+        {
+            'researcher_id': 'res-5',
+            'lattes_id': '5555555555555555',
+            'cep': '00000-000',
+            'address_institution': 'UESC',
+            'researcher_institution_id': None,
+        },
+    ]
+
+    session = MagicMock()
+    inst_result = MagicMock()
+    inst_result.mappings.return_value.all.return_value = [
+        {'id': 'inst-ufob', 'acronym': 'UFOB', 'name': 'Universidade Federal do Oeste da Bahia'},
+        {'id': 'inst-ufrb', 'acronym': 'UFRB', 'name': 'Universidade Federal do Recôncavo da Bahia'},
+        {'id': 'inst-uesc', 'acronym': 'UESC', 'name': 'Universidade Estadual de Santa Cruz'},
+    ]
+    city_result = MagicMock()
+    city_result.mappings.return_value.all.return_value = [
+        {'id': 'city-ssa', 'name': 'Salvador'},
+        {'id': 'city-bar', 'name': 'Barreiras'},
+        {'id': 'city-santo-amaro', 'name': 'Santo Amaro'},
+    ]
+    addr_result = MagicMock()
+    addr_result.mappings.return_value.all.return_value = address_rows
+    insert_result = MagicMock()
+    session.execute.side_effect = [
+        inst_result,
+        city_result,
+        addr_result,
+        insert_result,
+    ]
+
+    # Mesmo sem diretório seed/researchers, o fallback via researcher_address roda
+    stats = eri.run(session, settings=Settings(STORAGE_DIR=tmp_path))
+
+    assert stats.found == 5
+    assert stats.succeeded == 3
+    assert stats.failed == 2
+    session.commit.assert_called_once()
+
+    insert_sql, insert_params = session.execute.call_args_list[3].args
+    assert 'INSERT INTO public.researcher_institution' in str(insert_sql)
+    by_res = {row['researcher_id']: row for row in insert_params}
+
+    assert by_res['res-1'] == {
+        'researcher_id': 'res-1',
+        'institution_id': 'inst-uesc',
+        'identity_territory': 'METROPOLITANA DE SALVADOR',
+        'city_id': 'city-ssa',
+    }
+    assert by_res['res-2'] == {
+        'researcher_id': 'res-2',
+        'institution_id': 'inst-ufob',
+        'identity_territory': 'BACIA DO RIO GRANDE',
+        'city_id': 'city-bar',
+    }
+    assert by_res['res-3'] == {
+        'researcher_id': 'res-3',
+        'institution_id': 'inst-ufrb',
+        'identity_territory': 'RECÔNCAVO',
+        'city_id': 'city-santo-amaro',
+    }
