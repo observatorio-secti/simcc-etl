@@ -219,22 +219,33 @@ def _resolve_location(
     return city_id, territory
 
 
-def _load_institution_ids(session: Session) -> dict[str, str]:
+def _load_institutions(
+    session: Session,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Carrega mapas de instituições por sigla (CSV) e por nome/sigla normalizados."""
     rows = (
         session.execute(
-            text(
-                'SELECT id::TEXT AS id, acronym FROM public.institution '
-                'WHERE acronym IS NOT NULL'
-            )
+            text('SELECT id::TEXT AS id, acronym, name FROM public.institution')
         )
         .mappings()
         .all()
     )
-    return {
-        row['acronym'].strip().upper(): str(row['id'])
-        for row in rows
-        if row['acronym']
-    }
+    by_acronym: dict[str, str] = {}
+    by_normalized: dict[str, str] = {}
+    for row in rows:
+        inst_id = str(row['id'])
+        acronym = row.get('acronym')
+        name = row.get('name')
+        if acronym:
+            by_acronym[acronym.strip().upper()] = inst_id
+            norm_acronym = normalize_name_match(acronym)
+            if norm_acronym:
+                by_normalized.setdefault(norm_acronym, inst_id)
+        if name:
+            norm_name = normalize_name_match(name)
+            if norm_name:
+                by_normalized.setdefault(norm_name, inst_id)
+    return by_acronym, by_normalized
 
 
 def _load_city_ids(session: Session) -> dict[str, str]:
@@ -255,41 +266,26 @@ def _load_city_ids(session: Session) -> dict[str, str]:
     }
 
 
-def run(
+def _enrich_from_csvs(
     session: Session,
-    *,
-    lattes_ids: list[str] | None = None,
-    settings: Settings | None = None,
-    cep_ranges_path: Path = DEFAULT_CEP_RANGES_PATH,
-    territories_path: Path = DEFAULT_TERRITORIES_PATH,
-) -> Stats:
-    """Enriquece researcher_institution (território, carga e cidade)."""
-    if settings is None:
-        settings = Settings()
-
-    cep_lookup = CepLookup(cep_ranges_path)
-    territories = load_identity_territories(territories_path)
-
-    researchers_dir = settings.seed_researchers_dir
+    researchers_dir: Path,
+    institution_ids: dict[str, str],
+    city_ids: dict[str, str],
+    cep_lookup: CepLookup,
+    territories: dict[str, str],
+    allowed_lattes: set[str] | None,
+) -> tuple[int, int, int]:
+    """Atualiza researcher_institution a partir dos CSVs oficiais das instituições."""
     if not researchers_dir.exists():
         logger.warning(
             f'Diretório de pesquisadores não encontrado: {researchers_dir}'
         )
-        return Stats(found=0, succeeded=0, failed=0)
+        return 0, 0, 0
 
     csv_files = sorted(researchers_dir.glob('*.csv'))
     if not csv_files:
         logger.warning(f'Nenhum CSV encontrado em {researchers_dir}')
-        return Stats(found=0, succeeded=0, failed=0)
-
-    institution_ids = _load_institution_ids(session)
-    city_ids = _load_city_ids(session)
-
-    allowed_lattes = (
-        {clean_lattes_id(lid) for lid in lattes_ids if clean_lattes_id(lid)}
-        if lattes_ids
-        else None
-    )
+        return 0, 0, 0
 
     updates_by_key: dict[tuple[str, str], dict[str, Any]] = {}
     found = 0
@@ -333,28 +329,187 @@ def run(
             }
 
     params = list(updates_by_key.values())
-    update_sql = text(
-        """
-        UPDATE public.researcher_institution ri
-        SET
-            identity_territory = COALESCE(
-                :identity_territory, ri.identity_territory
-            ),
-            workload = COALESCE(:workload, ri.workload),
-            city_id = COALESCE(:city_id, ri.city_id)
-        FROM public.researcher r
-        WHERE ri.researcher_id = r.id
-          AND r.lattes_id = :lattes_id
-          AND ri.institution_id = CAST(:institution_id AS UUID);
-        """
+    if params:
+        update_sql = text(
+            """
+            UPDATE public.researcher_institution ri
+            SET
+                identity_territory = COALESCE(
+                    :identity_territory, ri.identity_territory
+                ),
+                workload = COALESCE(:workload, ri.workload),
+                city_id = COALESCE(:city_id, ri.city_id)
+            FROM public.researcher r
+            WHERE ri.researcher_id = r.id
+              AND r.lattes_id = :lattes_id
+              AND ri.institution_id = CAST(:institution_id AS UUID);
+            """
+        )
+        for i in range(0, len(params), BATCH_SIZE):
+            session.execute(update_sql, params[i : i + BATCH_SIZE])
+
+    return found, len(params), failed
+
+
+def _enrich_missing_from_address(
+    session: Session,
+    institution_by_name: dict[str, str],
+    city_ids: dict[str, str],
+    cep_lookup: CepLookup,
+    territories: dict[str, str],
+    allowed_lattes: set[str] | None,
+) -> tuple[int, int, int]:
+    """Preenche researcher_institution via CEP de researcher_address para quem não tem vínculo."""
+    rows = (
+        session.execute(
+            text(
+                """
+                SELECT DISTINCT ON (ra.researcher_id)
+                    ra.researcher_id::TEXT AS researcher_id,
+                    r.lattes_id,
+                    ra.cep,
+                    ra.institution AS address_institution,
+                    r.institution_id::TEXT AS researcher_institution_id
+                FROM public.researcher_address ra
+                JOIN public.researcher r ON r.id = ra.researcher_id
+                WHERE ra.cep IS NOT NULL
+                  AND TRIM(ra.cep) <> ''
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM public.researcher_institution ri
+                      WHERE ri.researcher_id = ra.researcher_id
+                  )
+                ORDER BY ra.researcher_id, ra.id;
+                """
+            )
+        )
+        .mappings()
+        .all()
     )
 
-    for i in range(0, len(params), BATCH_SIZE):
-        session.execute(update_sql, params[i : i + BATCH_SIZE])
+    inserts_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    found = 0
+    skipped_no_location = 0
+    skipped_no_institution = 0
+
+    for row in rows:
+        lattes_id = clean_lattes_id(row.get('lattes_id'))
+        if allowed_lattes is not None and (
+            not lattes_id or lattes_id not in allowed_lattes
+        ):
+            continue
+
+        found += 1
+        cep_city = cep_lookup.resolve(row.get('cep'))
+        if not cep_city:
+            skipped_no_location += 1
+            continue
+
+        city_key = _normalize_city_key(cep_city)
+        city_id = city_ids.get(city_key) if city_key else None
+        territory = territories.get(city_key) if city_key else None
+        if not city_id and not territory:
+            skipped_no_location += 1
+            continue
+
+        addr_inst_key = normalize_name_match(row.get('address_institution'))
+        institution_id = (
+            institution_by_name.get(addr_inst_key) if addr_inst_key else None
+        ) or row.get('researcher_institution_id')
+        if not institution_id:
+            skipped_no_institution += 1
+            continue
+
+        researcher_id = str(row['researcher_id'])
+        inserts_by_key[(researcher_id, str(institution_id))] = {
+            'researcher_id': researcher_id,
+            'institution_id': str(institution_id),
+            'identity_territory': territory,
+            'city_id': city_id,
+        }
+
+    params = list(inserts_by_key.values())
+    if params:
+        insert_sql = text(
+            """
+            INSERT INTO public.researcher_institution (
+                researcher_id,
+                institution_id,
+                identity_territory,
+                city_id
+            )
+            VALUES (
+                CAST(:researcher_id AS UUID),
+                CAST(:institution_id AS UUID),
+                :identity_territory,
+                CAST(:city_id AS UUID)
+            )
+            ON CONFLICT (researcher_id, institution_id) DO NOTHING;
+            """
+        )
+        for i in range(0, len(params), BATCH_SIZE):
+            session.execute(insert_sql, params[i : i + BATCH_SIZE])
+
+    logger.info(
+        f'Fallback via researcher_address (CEP): {len(params)} inseridos '
+        f'de {found} elegíveis ({skipped_no_location} sem localização, '
+        f'{skipped_no_institution} sem institution_id)'
+    )
+    return found, len(params), skipped_no_location + skipped_no_institution
+
+
+def run(
+    session: Session,
+    *,
+    lattes_ids: list[str] | None = None,
+    settings: Settings | None = None,
+    cep_ranges_path: Path = DEFAULT_CEP_RANGES_PATH,
+    territories_path: Path = DEFAULT_TERRITORIES_PATH,
+) -> Stats:
+    """Enriquece researcher_institution (território, carga e cidade)."""
+    if settings is None:
+        settings = Settings()
+
+    cep_lookup = CepLookup(cep_ranges_path)
+    territories = load_identity_territories(territories_path)
+    institution_by_acronym, institution_by_name = _load_institutions(session)
+    city_ids = _load_city_ids(session)
+
+    allowed_lattes = (
+        {clean_lattes_id(lid) for lid in lattes_ids if clean_lattes_id(lid)}
+        if lattes_ids
+        else None
+    )
+
+    csv_found, csv_succeeded, csv_failed = _enrich_from_csvs(
+        session=session,
+        researchers_dir=settings.seed_researchers_dir,
+        institution_ids=institution_by_acronym,
+        city_ids=city_ids,
+        cep_lookup=cep_lookup,
+        territories=territories,
+        allowed_lattes=allowed_lattes,
+    )
+    addr_found, addr_succeeded, addr_failed = _enrich_missing_from_address(
+        session=session,
+        institution_by_name=institution_by_name,
+        city_ids=city_ids,
+        cep_lookup=cep_lookup,
+        territories=territories,
+        allowed_lattes=allowed_lattes,
+    )
     session.commit()
+
+    total_found = csv_found + addr_found
+    total_succeeded = csv_succeeded + addr_succeeded
+    total_failed = csv_failed + addr_failed
 
     logger.info(
         f'Enriquecimento de researcher_institution concluído: '
-        f'{len(params)} registros atualizados ({failed} inválidos)'
+        f'{csv_succeeded} atualizados via CSV, '
+        f'{addr_succeeded} inseridos via researcher_address '
+        f'({total_failed} inválidos/ignorados)'
     )
-    return Stats(found=found, succeeded=len(params), failed=failed)
+    return Stats(
+        found=total_found, succeeded=total_succeeded, failed=total_failed
+    )
