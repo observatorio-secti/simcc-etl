@@ -75,11 +75,14 @@ def _mock_session_with_db_maps(address_rows=None):
     addr_result = MagicMock()
     addr_result.mappings.return_value.all.return_value = address_rows or []
     write_result = MagicMock()
+    write_result.rowcount = 0
     session.execute.side_effect = [
         inst_result,
         city_result,
         write_result,
         addr_result,
+        write_result,
+        write_result,
         write_result,
     ]
     return session
@@ -237,12 +240,14 @@ def test_run_enriches_missing_researchers_from_address_cep(tmp_path):
     ]
     addr_result = MagicMock()
     addr_result.mappings.return_value.all.return_value = address_rows
-    insert_result = MagicMock()
+    write_result = MagicMock()
+    write_result.rowcount = 0
     session.execute.side_effect = [
         inst_result,
         city_result,
         addr_result,
-        insert_result,
+        write_result,
+        write_result,
     ]
 
     # Mesmo sem diretório seed/researchers, o fallback via researcher_address roda
@@ -275,3 +280,120 @@ def test_run_enriches_missing_researchers_from_address_cep(tmp_path):
         'identity_territory': 'RECÔNCAVO',
         'city_id': 'city-santo-amaro',
     }
+
+
+def _make_ctx():
+    return eri.EnrichmentContext(
+        cep_lookup=eri.CepLookup(),
+        territories=eri.load_identity_territories(),
+        city_ids={
+            'SALVADOR': 'city-ssa',
+            'FEIRADESANTANA': 'city-fds',
+            'ILHEUS': 'city-ilh',
+            'VALENCA': 'city-val',
+        },
+        institution_by_acronym={
+            'EBMSP': 'inst-ebmsp',
+            'UEFS': 'inst-uefs',
+            'UESC': 'inst-uesc',
+            'UFBA': 'inst-ufba',
+        },
+        institution_by_name={
+            'EBMSP': 'inst-ebmsp',
+            'UEFS': 'inst-uefs',
+            'UESC': 'inst-uesc',
+            'UFBA': 'inst-ufba',
+        },
+    )
+
+
+def test_resolve_address_location_city_uf_fallback_and_homonym_guard():
+    ctx = _make_ctx()
+
+    # CEP genérico 40000-000 falha no CepLookup, mas cidade+UF='BA' resolve
+    assert eri._resolve_address_location(
+        '40000-000', 'Salvador', 'BA', ctx
+    ) == ('city-ssa', 'METROPOLITANA DE SALVADOR')
+
+    # Homônimo fora da BA (ex.: Valença/RJ) não recebe Território de Identidade da BA
+    assert eri._resolve_address_location(None, 'Valença', 'RJ', ctx) == (
+        'city-val',
+        None,
+    )
+
+
+def test_stage_address_enrichment_updates_existing_nulls_and_guards_multilink():
+    ctx = _make_ctx()
+    address_rows = [
+        # Pesquisador com 1 vínculo existente sem território -> atualiza
+        {
+            'researcher_id': 'res-single',
+            'lattes_id': '1111111111111111',
+            'cep': '40000-000',
+            'city': 'Salvador',
+            'uf': 'BA',
+            'address_institution': 'Outra Nomeclatura',
+            'researcher_institution_id': None,
+            'existing_institution_id': 'inst-ufba',
+            'link_count': 1,
+        },
+        # Multi-vínculo: endereço bate com UFBA -> atualiza UFBA
+        {
+            'researcher_id': 'res-multi',
+            'lattes_id': '2222222222222222',
+            'cep': '41.150-000',
+            'city': 'Salvador',
+            'uf': 'BA',
+            'address_institution': 'UFBA',
+            'researcher_institution_id': None,
+            'existing_institution_id': 'inst-ufba',
+            'link_count': 2,
+        },
+        # Multi-vínculo: endereço é UFBA, vínculo é UEFS -> NÃO sobrescreve UEFS
+        {
+            'researcher_id': 'res-multi',
+            'lattes_id': '2222222222222222',
+            'cep': '41.150-000',
+            'city': 'Salvador',
+            'uf': 'BA',
+            'address_institution': 'UFBA',
+            'researcher_institution_id': None,
+            'existing_institution_id': 'inst-uefs',
+            'link_count': 2,
+        },
+    ]
+    session = MagicMock()
+    addr_res = MagicMock()
+    addr_res.mappings.return_value.all.return_value = address_rows
+    update_res = MagicMock()
+    session.execute.side_effect = [addr_res, update_res]
+
+    found, succeeded, failed = eri._stage_address_enrichment(session, ctx)
+    assert found == 3
+    assert succeeded == 2
+    assert failed == 1
+
+    update_sql, update_params = session.execute.call_args_list[1].args
+    assert 'UPDATE public.researcher_institution' in str(update_sql)
+    assert len(update_params) == 2
+    assert {
+        (p['researcher_id'], p['institution_id']) for p in update_params
+    } == {('res-single', 'inst-ufba'), ('res-multi', 'inst-ufba')}
+
+
+def test_stage_institution_headquarters_updates_single_center_only():
+    ctx = _make_ctx()
+    session = MagicMock()
+    res1 = MagicMock(rowcount=10)
+    res2 = MagicMock(rowcount=20)
+    res3 = MagicMock(rowcount=30)
+    session.execute.side_effect = [res1, res2, res3]
+
+    updated = eri._stage_institution_headquarters(session, ctx)
+    assert updated == 60
+    assert session.execute.call_count == 3
+    called_insts = [
+        call.args[1]['institution_id']
+        for call in session.execute.call_args_list
+    ]
+    assert called_insts == ['inst-ebmsp', 'inst-uefs', 'inst-uesc']
