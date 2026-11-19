@@ -74,6 +74,8 @@ def _mock_session_with_db_maps(address_rows=None):
     ]
     addr_result = MagicMock()
     addr_result.mappings.return_value.all.return_value = address_rows or []
+    rpe_result = MagicMock()
+    rpe_result.mappings.return_value.all.return_value = []
     write_result = MagicMock()
     write_result.rowcount = 0
     session.execute.side_effect = [
@@ -84,6 +86,7 @@ def _mock_session_with_db_maps(address_rows=None):
         write_result,
         write_result,
         write_result,
+        rpe_result,
     ]
     return session
 
@@ -240,6 +243,8 @@ def test_run_enriches_missing_researchers_from_address_cep(tmp_path):
     ]
     addr_result = MagicMock()
     addr_result.mappings.return_value.all.return_value = address_rows
+    rpe_result = MagicMock()
+    rpe_result.mappings.return_value.all.return_value = []
     write_result = MagicMock()
     write_result.rowcount = 0
     session.execute.side_effect = [
@@ -248,6 +253,7 @@ def test_run_enriches_missing_researchers_from_address_cep(tmp_path):
         addr_result,
         write_result,
         write_result,
+        rpe_result,
     ]
 
     # Mesmo sem diretório seed/researchers, o fallback via researcher_address roda
@@ -397,3 +403,90 @@ def test_stage_institution_headquarters_updates_single_center_only():
         for call in session.execute.call_args_list
     ]
     assert called_insts == ['inst-ebmsp', 'inst-uefs', 'inst-uesc']
+
+
+def test_stage_rpe_workload_prioritizes_formal_and_filters_noise():
+    ctx = _make_ctx()
+    rpe_rows = [
+        # Atividade Livre parcial (10h) vs vínculo Servidor_Publico (DE -> 40h)
+        {
+            'researcher_id': 'res-1',
+            'institution_id': 'inst-ufba',
+            'lattes_id': '1111111111111111',
+            'enterprise': 'UFBA',
+            'employment_type': 'Livre',
+            'other_employment_type': 'Professor',
+            'other_functional_classification': None,
+            'workload_hours_weekly': 10,
+            'exclusive_dedication': False,
+            'start_year': 2024,
+        },
+        {
+            'researcher_id': 'res-1',
+            'institution_id': 'inst-ufba',
+            'lattes_id': '1111111111111111',
+            'enterprise': 'UFBA',
+            'employment_type': 'Servidor_Publico',
+            'other_employment_type': 'Servidor Público',
+            'other_functional_classification': None,
+            'workload_hours_weekly': None,
+            'exclusive_dedication': True,
+            'start_year': 2015,
+        },
+        # Livre válido (não ruído) -> 20h
+        {
+            'researcher_id': 'res-2',
+            'institution_id': 'inst-uefs',
+            'lattes_id': '2222222222222222',
+            'enterprise': 'UEFS',
+            'employment_type': 'Livre',
+            'other_employment_type': 'Professor',
+            'other_functional_classification': None,
+            'workload_hours_weekly': 20,
+            'exclusive_dedication': False,
+            'start_year': 2020,
+        },
+        # Ruído: Bolsista -> descartado
+        {
+            'researcher_id': 'res-3',
+            'institution_id': 'inst-uesc',
+            'lattes_id': '3333333333333333',
+            'enterprise': 'UESC',
+            'employment_type': 'Livre',
+            'other_employment_type': 'Bolsista',
+            'other_functional_classification': None,
+            'workload_hours_weekly': 40,
+            'exclusive_dedication': False,
+            'start_year': 2022,
+        },
+        # Enterprise de outra instituição -> descartado
+        {
+            'researcher_id': 'res-4',
+            'institution_id': 'inst-uesc',
+            'lattes_id': '4444444444444444',
+            'enterprise': 'UFBA',
+            'employment_type': 'Servidor_Publico',
+            'other_employment_type': None,
+            'other_functional_classification': None,
+            'workload_hours_weekly': 40,
+            'exclusive_dedication': False,
+            'start_year': 2018,
+        },
+    ]
+
+    session = MagicMock()
+    rpe_res = MagicMock()
+    rpe_res.mappings.return_value.all.return_value = rpe_rows
+    update_res = MagicMock()
+    session.execute.side_effect = [rpe_res, update_res]
+
+    found, succeeded, failed = eri._stage_rpe_workload(session, ctx)
+    assert found == 5
+    assert succeeded == 2
+    assert failed == 2
+
+    update_sql, update_params = session.execute.call_args_list[1].args
+    assert 'UPDATE public.researcher_institution' in str(update_sql)
+    by_res = {row['researcher_id']: row for row in update_params}
+    assert by_res['res-1']['workload'] == 40.0
+    assert by_res['res-2']['workload'] == 20.0

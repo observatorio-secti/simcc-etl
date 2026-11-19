@@ -68,6 +68,18 @@ SINGLE_CENTER_INSTITUTIONS: dict[str, str] = {
     'UESC': 'Ilhéus',
 }
 
+# Regras para Camada 5 (workload via researcher_professional_experience)
+FORMAL_EMPLOYMENT_TYPES = frozenset({
+    'Servidor_Publico',
+    'Celetista',
+    'Professor_Visitante',
+})
+RPE_NOISE_PATTERN = re.compile(
+    r'(bols|estagi|aluno|discente|estudante|volunt|monitor|tutor|'
+    r'revisor|editorial|comit)',
+    re.IGNORECASE,
+)
+
 InstitutionParser = Callable[[dict[str, Any]], dict[str, Any]]
 INSTITUTION_PARSERS: dict[str, InstitutionParser] = {}
 
@@ -633,6 +645,133 @@ def _stage_institution_headquarters(
     return total_updated
 
 
+def _resolve_rpe_workload(row: dict[str, Any]) -> float | None:
+    """Extrai carga horária semanal válida de researcher_professional_experience."""
+    if row.get('exclusive_dedication') is True:
+        return EXCLUSIVE_DEDICATION_HOURS
+    raw_hours = row.get('workload_hours_weekly')
+    if raw_hours is None:
+        return None
+    hours = float(raw_hours)
+    if WORKLOAD_MIN_HOURS <= hours <= WORKLOAD_MAX_HOURS:
+        return hours
+    return None
+
+
+def _is_rpe_noise(row: dict[str, Any]) -> bool:
+    other_emp = row.get('other_employment_type') or ''
+    other_func = row.get('other_functional_classification') or ''
+    combined = f'{other_emp} {other_func}'.strip()
+    return bool(combined and RPE_NOISE_PATTERN.search(combined))
+
+
+def _stage_rpe_workload(
+    session: Session,
+    ctx: EnrichmentContext,
+) -> tuple[int, int, int]:
+    """Camada 5: Preenche workload NULL em vínculos existentes via rpe."""
+    rows = (
+        session.execute(
+            text(
+                """
+                SELECT
+                    ri.researcher_id::TEXT AS researcher_id,
+                    ri.institution_id::TEXT AS institution_id,
+                    r.lattes_id,
+                    rpe.enterprise,
+                    rpe.employment_type,
+                    rpe.other_employment_type,
+                    rpe.other_functional_classification,
+                    rpe.workload_hours_weekly,
+                    rpe.exclusive_dedication,
+                    rpe.start_year
+                FROM public.researcher_institution ri
+                JOIN public.researcher r ON r.id = ri.researcher_id
+                JOIN public.researcher_professional_experience rpe
+                    ON rpe.researcher_id = ri.researcher_id
+                WHERE ri.workload IS NULL
+                  AND rpe.end_year IS NULL
+                  AND (
+                      rpe.exclusive_dedication IS TRUE
+                      OR (
+                          rpe.workload_hours_weekly IS NOT NULL
+                          AND rpe.workload_hours_weekly BETWEEN 0 AND 168
+                      )
+                  );
+                """
+            )
+        )
+        .mappings()
+        .all()
+    )
+
+    best_by_key: dict[tuple[str, str], tuple[tuple[int, int, float, int], float]] = {}
+    found = 0
+    skipped_mismatch = 0
+    skipped_noise = 0
+
+    for row in rows:
+        lattes_id = clean_lattes_id(row.get('lattes_id'))
+        if ctx.allowed_lattes is not None and (
+            not lattes_id or lattes_id not in ctx.allowed_lattes
+        ):
+            continue
+
+        found += 1
+        ent_key = normalize_name_match(row.get('enterprise'))
+        ent_inst_id = ctx.institution_by_name.get(ent_key) if ent_key else None
+        ri_inst_id = str(row['institution_id'])
+        if not ent_inst_id or ent_inst_id != ri_inst_id:
+            skipped_mismatch += 1
+            continue
+
+        if _is_rpe_noise(row):
+            skipped_noise += 1
+            continue
+
+        workload = _resolve_rpe_workload(row)
+        if workload is None:
+            continue
+
+        emp_type = row.get('employment_type') or ''
+        is_formal = 1 if emp_type in FORMAL_EMPLOYMENT_TYPES else 0
+        is_de = 1 if row.get('exclusive_dedication') is True else 0
+        start_year = int(row.get('start_year') or 0)
+        priority = (is_formal, is_de, workload, start_year)
+
+        key = (str(row['researcher_id']), ri_inst_id)
+        current = best_by_key.get(key)
+        if current is None or priority > current[0]:
+            best_by_key[key] = (priority, workload)
+
+    params = [
+        {
+            'researcher_id': res_id,
+            'institution_id': inst_id,
+            'workload': wl,
+        }
+        for (res_id, inst_id), (_, wl) in best_by_key.items()
+    ]
+    if params:
+        update_sql = text(
+            """
+            UPDATE public.researcher_institution
+            SET workload = COALESCE(workload, :workload)
+            WHERE researcher_id = CAST(:researcher_id AS UUID)
+              AND institution_id = CAST(:institution_id AS UUID)
+              AND workload IS NULL;
+            """
+        )
+        _execute_in_batches(session, update_sql, params)
+
+    logger.info(
+        f'Camada 5 (rpe workload): {len(params)} atualizados de {found} '
+        f'candidatos ({skipped_mismatch} enterprise divergente, '
+        f'{skipped_noise} ruído descartado)'
+    )
+    return found, len(params), skipped_mismatch + skipped_noise
+
+
 def run(
     session: Session,
     *,
@@ -641,7 +780,7 @@ def run(
     cep_ranges_path: Path = DEFAULT_CEP_RANGES_PATH,
     territories_path: Path = DEFAULT_TERRITORIES_PATH,
 ) -> Stats:
-    """Enriquece researcher_institution em camadas (CSV, endereço e sede)."""
+    """Enriquece researcher_institution em camadas (CSV, endereço, sede e rpe)."""
     if settings is None:
         settings = Settings()
 
@@ -672,16 +811,20 @@ def run(
         session, ctx
     )
     hq_updated = _stage_institution_headquarters(session, ctx)
+    rpe_found, rpe_succeeded, rpe_failed = _stage_rpe_workload(session, ctx)
     session.commit()
 
-    total_found = csv_found + addr_found
-    total_succeeded = csv_succeeded + addr_succeeded + hq_updated
-    total_failed = csv_failed + addr_failed
+    total_found = csv_found + addr_found + rpe_found
+    total_succeeded = (
+        csv_succeeded + addr_succeeded + hq_updated + rpe_succeeded
+    )
+    total_failed = csv_failed + addr_failed + rpe_failed
 
     logger.info(
         f'Enriquecimento de researcher_institution concluído: '
         f'{csv_succeeded} via CSV, {addr_succeeded} via researcher_address, '
-        f'{hq_updated} via sede ({total_failed} inválidos/ignorados)'
+        f'{hq_updated} via sede, {rpe_succeeded} workload via rpe '
+        f'({total_failed} inválidos/ignorados)'
     )
     return Stats(
         found=total_found, succeeded=total_succeeded, failed=total_failed
