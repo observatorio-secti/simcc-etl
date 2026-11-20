@@ -32,6 +32,11 @@ def main():
         action='store_true',
         help='Lista as rotinas registradas e encerra.',
     )
+    parser.add_argument(
+        '--force',
+        action='store_true',
+        help='Ignora caches/TTL quando suportado pela rotina.',
+    )
 
     args = parser.parse_args()
 
@@ -48,6 +53,7 @@ def main():
             routines=args.routines,
             lattes_ids=args.lattes_ids,
             triggered_by='cli',
+            force=args.force,
         )
         print('✅ ETL finalizado com sucesso.')
     except AlreadyRunningError:

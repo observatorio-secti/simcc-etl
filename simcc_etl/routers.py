@@ -56,6 +56,7 @@ class RunTriggerRequest(BaseModel):
     routines: list[str] | None = None
     lattes_ids: list[str] | None = None
     triggered_by: str = 'admin'
+    force: bool = False
 
 
 class RunTriggerResponse(BaseModel):
@@ -112,6 +113,7 @@ def trigger_run(
                 lattes_ids=payload.lattes_ids,
                 triggered_by=payload.triggered_by,
                 run_id=run_id,
+                force=payload.force,
             )
         except AlreadyRunningError:
             pass

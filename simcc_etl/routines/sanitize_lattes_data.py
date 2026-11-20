@@ -206,6 +206,203 @@ def fetch_admin_metadata_parquet(
     return saved_paths
 
 
+def _sync_institutions(
+    write_session: Session,
+    df_inst: pl.DataFrame,
+) -> None:
+    """Sincroniza public.institution (inserção, atualização e remoção)."""
+    existing_insts = (
+        write_session.execute(
+            text('SELECT id, name, acronym FROM public.institution')
+        )
+        .mappings()
+        .all()
+    )
+    by_id = {row['id']: row for row in existing_insts}
+    by_acronym = {
+        row['acronym']: row['id'] for row in existing_insts if row['acronym']
+    }
+    by_name = {
+        row['name'].lower(): row['id'] for row in existing_insts if row['name']
+    }
+
+    admin_rows = list(df_inst.iter_rows(named=True))
+    for inst in admin_rows:
+        name = inst.get('name')
+        acronym = inst.get('acronym')
+        inst_id = (by_acronym.get(acronym) if acronym else None) or (
+            by_name.get(name.lower()) if name else None
+        )
+        if not inst_id:
+            write_session.execute(
+                text(
+                    'INSERT INTO public.institution (name, acronym) '
+                    'VALUES (:name, :acronym)'
+                ),
+                {'name': name, 'acronym': acronym},
+            )
+            continue
+
+        current = by_id[inst_id]
+        name_changed = bool(name and current['name'] != name)
+        acronym_changed = bool(acronym and current['acronym'] != acronym)
+        if name_changed or acronym_changed:
+            write_session.execute(
+                text(
+                    'UPDATE public.institution '
+                    'SET name = COALESCE(:name, name), '
+                    '    acronym = COALESCE(:acronym, acronym) '
+                    'WHERE id = :id'
+                ),
+                {'name': name, 'acronym': acronym, 'id': inst_id},
+            )
+
+    if admin_rows:
+        admin_acronyms = {
+            r['acronym'] for r in admin_rows if r.get('acronym')
+        }
+        admin_names = {
+            r['name'].lower() for r in admin_rows if r.get('name')
+        }
+        removed_ids = [
+            row['id']
+            for row in existing_insts
+            if not (
+                (row['acronym'] and row['acronym'] in admin_acronyms)
+                or (row['name'] and row['name'].lower() in admin_names)
+            )
+        ]
+        if removed_ids:
+            blocked_rows = write_session.execute(
+                text(
+                    'SELECT DISTINCT institution_id '
+                    'FROM public.graduate_program '
+                    'WHERE institution_id = ANY(:ids)'
+                ),
+                {'ids': removed_ids},
+            ).fetchall()
+            blocked_ids = {r[0] for r in blocked_rows}
+            if blocked_ids:
+                logger.warning(
+                    f'{len(blocked_ids)} instituição(ões) removida(s) do '
+                    'simcc-admin ainda possuem graduate_program vinculado e '
+                    'não foram excluídas.'
+                )
+
+            deletable_ids = [i for i in removed_ids if i not in blocked_ids]
+            if deletable_ids:
+                write_session.execute(
+                    text(
+                        'UPDATE public.researcher '
+                        'SET institution_id = NULL '
+                        'WHERE institution_id = ANY(:ids)'
+                    ),
+                    {'ids': deletable_ids},
+                )
+                write_session.execute(
+                    text(
+                        'UPDATE public.labs '
+                        'SET institution_id = NULL '
+                        'WHERE institution_id = ANY(:ids)'
+                    ),
+                    {'ids': deletable_ids},
+                )
+                write_session.execute(
+                    text(
+                        'DELETE FROM public.institution '
+                        'WHERE id = ANY(:ids)'
+                    ),
+                    {'ids': deletable_ids},
+                )
+                logger.info(
+                    f'{len(deletable_ids)} instituição(ões) removida(s) de '
+                    'public.institution.'
+                )
+    else:
+        logger.warning(
+            'Parquet de instituições do simcc-admin vazio; '
+            'remoção de instituições ignorada por segurança.'
+        )
+
+    write_session.commit()
+
+
+def _sync_researcher_institutions(
+    write_session: Session,
+    df_ri: pl.DataFrame,
+    batch_size: int = 5000,
+) -> None:
+    """Sincroniza vínculos researcher_institution por diff com o simcc-admin."""
+    ri_params = [
+        {'lattes_id': row['lattes_id'], 'acronym': row['acronym']}
+        for row in df_ri.iter_rows(named=True)
+        if row.get('lattes_id') and row.get('acronym')
+    ]
+    for i in range(0, len(ri_params), batch_size):
+        write_session.execute(
+            text(
+                """
+                INSERT INTO public.researcher_institution (
+                    researcher_id, institution_id
+                )
+                SELECT r.id, i.id
+                FROM public.researcher r
+                CROSS JOIN public.institution i
+                WHERE r.lattes_id = :lattes_id AND i.acronym = :acronym
+                ON CONFLICT (researcher_id, institution_id) DO NOTHING;
+                """
+            ),
+            ri_params[i : i + batch_size],
+        )
+
+    write_session.execute(
+        text(
+            'CREATE TEMP TABLE _admin_ri ('
+            '    lattes_id TEXT, '
+            '    acronym TEXT'
+            ') ON COMMIT DROP;'
+        )
+    )
+    for i in range(0, len(ri_params), batch_size):
+        write_session.execute(
+            text(
+                'INSERT INTO _admin_ri (lattes_id, acronym) '
+                'VALUES (:lattes_id, :acronym);'
+            ),
+            ri_params[i : i + batch_size],
+        )
+    write_session.execute(
+        text(
+            """
+            DELETE FROM public.researcher_institution ri
+            USING public.researcher r, public.institution i
+            WHERE ri.researcher_id = r.id
+              AND ri.institution_id = i.id
+              AND NOT EXISTS (
+                  SELECT 1 FROM _admin_ri a
+                  WHERE a.lattes_id = r.lattes_id
+                    AND a.acronym = i.acronym
+              );
+            """
+        )
+    )
+    write_session.execute(
+        text(
+            """
+            UPDATE public.researcher r
+            SET institution_id = NULL
+            WHERE r.institution_id IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM public.researcher_institution ri
+                  WHERE ri.researcher_id = r.id
+                    AND ri.institution_id = r.institution_id
+              );
+            """
+        )
+    )
+    write_session.commit()
+
+
 def sync_admin_data(
     write_session: Session,
     settings: Settings | None = None,
@@ -227,44 +424,8 @@ def sync_admin_data(
 
     batch_size = 5000
 
-    # a) Garantir instituições em public.institution (por acronym ou name)
-    existing_insts = (
-        write_session.execute(
-            text('SELECT id, name, acronym FROM public.institution')
-        )
-        .mappings()
-        .all()
-    )
-    by_acronym = {
-        row['acronym']: row['id'] for row in existing_insts if row['acronym']
-    }
-    by_name = {
-        row['name'].lower(): row['id'] for row in existing_insts if row['name']
-    }
-
-    for inst in df_inst.iter_rows(named=True):
-        name = inst.get('name')
-        acronym = inst.get('acronym')
-        inst_id = (by_acronym.get(acronym) if acronym else None) or (
-            by_name.get(name.lower()) if name else None
-        )
-        if not inst_id:
-            write_session.execute(
-                text(
-                    'INSERT INTO public.institution (name, acronym) '
-                    'VALUES (:name, :acronym)'
-                ),
-                {'name': name, 'acronym': acronym},
-            )
-        elif acronym and not by_acronym.get(acronym):
-            write_session.execute(
-                text(
-                    'UPDATE public.institution SET acronym = :acronym '
-                    'WHERE id = :id AND acronym IS NULL'
-                ),
-                {'acronym': acronym, 'id': inst_id},
-            )
-    write_session.commit()
+    # a) Instituições (inserção, atualização e remoção)
+    _sync_institutions(write_session, df_inst)
 
     # b) Coleções: lê collections.parquet e garante em public.collection
     write_session.execute(
@@ -319,29 +480,8 @@ def sync_admin_data(
         )
     write_session.commit()
 
-    # c) Vínculos de Pesquisadores e Instituições
-    ri_params = [
-        {'lattes_id': row['lattes_id'], 'acronym': row['acronym']}
-        for row in df_ri.iter_rows(named=True)
-        if row.get('lattes_id') and row.get('acronym')
-    ]
-    for i in range(0, len(ri_params), batch_size):
-        write_session.execute(
-            text(
-                """
-                INSERT INTO public.researcher_institution (
-                    researcher_id, institution_id
-                )
-                SELECT r.id, i.id
-                FROM public.researcher r
-                CROSS JOIN public.institution i
-                WHERE r.lattes_id = :lattes_id AND i.acronym = :acronym
-                ON CONFLICT (researcher_id, institution_id) DO NOTHING;
-                """
-            ),
-            ri_params[i : i + batch_size],
-        )
-    write_session.commit()
+    # c) Vínculos de Pesquisadores e Instituições (por diff)
+    _sync_researcher_institutions(write_session, df_ri, batch_size=batch_size)
 
     # d) Vínculos de Pesquisadores e Coleções
     rc_params = [

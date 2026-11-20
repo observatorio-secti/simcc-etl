@@ -114,3 +114,41 @@ def test_run_pipeline_stops_when_blocking_routine_fails(monkeypatch):
     assert added_run.error_message == 'erro crítico'
     assert added_run.steps['blocking_step']['status'] == 'FAILED'
     assert 'non_blocking' not in added_run.steps['blocking_step']
+
+
+def test_run_pipeline_passes_force_only_when_supported(monkeypatch):
+    engine, lock_conn, session = _make_mock_engine_and_session()
+    received_force: list[bool] = []
+    called_no_force: list[bool] = []
+
+    def routine_with_force(sess, lattes_ids=None, force=False):
+        received_force.append(force)
+        return Stats(found=1, succeeded=1, failed=0)
+
+    def routine_without_force(sess, lattes_ids=None):
+        called_no_force.append(True)
+        return Stats(found=1, succeeded=1, failed=0)
+
+    monkeypatch.setitem(pipeline.ROUTINES, 'with_force', routine_with_force)
+    monkeypatch.setitem(
+        pipeline.ROUTINES, 'without_force', routine_without_force
+    )
+
+    with (
+        patch.object(pipeline, 'get_write_engine', return_value=engine),
+        patch.object(pipeline, 'create_etl_tables'),
+        patch.object(pipeline, 'try_acquire_lock', return_value=True),
+        patch.object(pipeline, 'release_lock', return_value=True),
+        patch.object(pipeline, 'get_write_session', return_value=session),
+    ):
+        etl_run = pipeline.run_pipeline(
+            routines=['with_force', 'without_force'],
+            triggered_by='test',
+            force=True,
+        )
+
+    assert etl_run.status == 'SUCCEEDED'
+    assert received_force == [True]
+    assert called_no_force == [True]
+    assert lock_conn.close.called
+    assert session.close.called

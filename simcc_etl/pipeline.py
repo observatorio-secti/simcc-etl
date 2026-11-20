@@ -1,3 +1,4 @@
+import inspect
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -37,6 +38,7 @@ from simcc_etl.routines import (
     import_capes_programs,
     import_program_research_lines,
     publish_to_read_db,
+    remove_researchers,
     resolve_cnpq_lattes_id,
     sanitize_lattes_data,
     soap_lattes,
@@ -60,6 +62,7 @@ ROUTINES: dict[str, Callable[..., Stats]] = {
     'soap_lattes': soap_lattes.run,
     'hop_index': extract_lattes_hop.run_index,
     'sanitize_lattes_data': sanitize_lattes_data.run,
+    'remove_researchers': remove_researchers.run,
     'enrich_researcher_institution': enrich_researcher_institution.run,
     'aggregate_researcher_production': aggregate_researcher_production.run,
     'calculate_researcher_indprod': (
@@ -96,6 +99,7 @@ DEFAULT_ROUTINES: list[str] = [
     'import_capes_ratings',
     'import_capes_researchers',
     'sanitize_lattes_data',
+    'remove_researchers',
     'enrich_researcher_institution',
     'aggregate_researcher_production',
     'export_oda_research_groups',
@@ -138,6 +142,7 @@ def run_pipeline(  # noqa: C901, PLR0912, PLR0915
     lattes_ids: list[str] | None = None,
     triggered_by: str = 'system',
     run_id: UUID | None = None,
+    force: bool = False,
 ) -> EtlRun:
     """Executa a sequência de rotinas com advisory lock e histórico."""
     engine = get_write_engine()
@@ -219,7 +224,12 @@ def run_pipeline(  # noqa: C901, PLR0912, PLR0915
 
             try:
                 # Executa a função da rotina
-                stats = fn(session, lattes_ids=lattes_ids)
+                routine_kwargs: dict[str, object] = {
+                    'lattes_ids': lattes_ids,
+                }
+                if force and 'force' in inspect.signature(fn).parameters:
+                    routine_kwargs['force'] = True
+                stats = fn(session, **routine_kwargs)
                 duration_ms = int((time.perf_counter() - step_start) * 1000)
 
                 etl_run.steps = {

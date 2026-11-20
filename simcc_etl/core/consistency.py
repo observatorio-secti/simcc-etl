@@ -103,6 +103,11 @@ CONSISTENCY_CATALOG: dict[str, ConsistencyTypeMeta] = {
         label='Higienização dos Dados Lattes',
         category='sanitization',
     ),
+    'remove_researchers': ConsistencyTypeMeta(
+        type='remove_researchers',
+        label='Remoção de Pesquisadores',
+        category='sanitization',
+    ),
     'enrich_researcher_institution': ConsistencyTypeMeta(
         type='enrich_researcher_institution',
         label='Vínculos Institucionais e Território',
@@ -175,6 +180,7 @@ ROUTINE_TO_CONSISTENCY_TYPES: dict[str, tuple[str, ...]] = {
     'import_capes_researchers': ('capes_researchers',),
     'import_program_research_lines': ('capes_research_lines',),
     'sanitize_lattes_data': ('sanitize_lattes',),
+    'remove_researchers': ('remove_researchers',),
     'enrich_researcher_institution': ('enrich_researcher_institution',),
     'aggregate_researcher_production': ('aggregate_production',),
     'export_oda_research_groups': ('oda_research_groups',),
