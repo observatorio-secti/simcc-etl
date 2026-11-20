@@ -11,6 +11,8 @@ from simcc_etl.routines.aggregate_researcher_production import (
 )
 from simcc_etl.routines.sanitize_lattes_data import (
     SQL_STEPS,
+    _sync_institutions,
+    _sync_researcher_institutions,
     fetch_admin_metadata_parquet,
     sync_admin_data,
 )
@@ -158,3 +160,76 @@ def test_aggregate_researcher_production_filtered():
     assert stats.failed == 0
     assert session.execute.call_count == 2
     session.commit.assert_called_once()
+
+
+def test_sync_institutions_updates_and_deletes_unblocked():
+    write_session = MagicMock()
+    existing_res = MagicMock()
+    existing_res.mappings.return_value.all.return_value = [
+        {'id': 'inst-1', 'name': 'Nome Antigo', 'acronym': 'UESC'},
+        {'id': 'inst-2', 'name': 'Inst Removida', 'acronym': 'REM'},
+        {'id': 'inst-3', 'name': 'Inst Bloqueada', 'acronym': 'BLK'},
+    ]
+    blocked_res = MagicMock()
+    blocked_res.fetchall.return_value = [('inst-3',)]
+
+    write_session.execute.side_effect = [
+        existing_res,  # SELECT existing
+        MagicMock(),  # UPDATE inst-1 name
+        blocked_res,  # SELECT graduate_program blocked
+        MagicMock(),  # UPDATE researcher.institution_id = NULL
+        MagicMock(),  # UPDATE labs.institution_id = NULL
+        MagicMock(),  # DELETE institution
+    ]
+
+    df_inst = pl.DataFrame({
+        'name': ['Nome Novo'],
+        'acronym': ['UESC'],
+    })
+
+    _sync_institutions(write_session, df_inst)
+
+    sql_calls = [str(c.args[0]) for c in write_session.execute.call_args_list]
+    assert any('UPDATE public.institution' in s for s in sql_calls)
+    assert any('DELETE FROM public.institution' in s for s in sql_calls)
+
+    delete_call = write_session.execute.call_args_list[-1]
+    assert delete_call.args[1] == {'ids': ['inst-2']}
+    write_session.commit.assert_called_once()
+
+
+def test_sync_institutions_empty_parquet_skips_deletion():
+    write_session = MagicMock()
+    existing_res = MagicMock()
+    existing_res.mappings.return_value.all.return_value = [
+        {'id': 'inst-1', 'name': 'UESC', 'acronym': 'UESC'},
+    ]
+    write_session.execute.return_value = existing_res
+
+    df_inst = pl.DataFrame(
+        {'name': [], 'acronym': []},
+        schema={'name': pl.Utf8, 'acronym': pl.Utf8},
+    )
+
+    _sync_institutions(write_session, df_inst)
+
+    sql_calls = [str(c.args[0]) for c in write_session.execute.call_args_list]
+    assert not any('DELETE FROM public.institution' in s for s in sql_calls)
+    write_session.commit.assert_called_once()
+
+
+def test_sync_researcher_institutions_deletes_removed_and_clears_fk():
+    write_session = MagicMock()
+    df_ri = pl.DataFrame({
+        'lattes_id': ['1111222233334444'],
+        'acronym': ['UESC'],
+    })
+
+    _sync_researcher_institutions(write_session, df_ri)
+
+    sql_calls = [str(c.args[0]) for c in write_session.execute.call_args_list]
+    assert any('INSERT INTO public.researcher_institution' in s for s in sql_calls)
+    assert any('CREATE TEMP TABLE _admin_ri' in s for s in sql_calls)
+    assert any('DELETE FROM public.researcher_institution ri' in s for s in sql_calls)
+    assert any('UPDATE public.researcher r' in s for s in sql_calls)
+    write_session.commit.assert_called_once()
