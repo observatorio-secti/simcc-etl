@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     # External APIs
     ALTERNATIVE_CNPQ_SERVICE: bool = True
     CNPQ_PROXY_URL: str = 'https://iapos-api.senaicimatec.com.br'
+    CHECK_LATTES_LAST_UPDATE: bool = True
     OPENALEX_API_KEY: str | None = None
     OPENALEX_BATCH_COMMIT_SIZE: int = 50
 

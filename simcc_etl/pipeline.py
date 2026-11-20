@@ -1,3 +1,4 @@
+import inspect
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -141,6 +142,7 @@ def run_pipeline(  # noqa: C901, PLR0912, PLR0915
     lattes_ids: list[str] | None = None,
     triggered_by: str = 'system',
     run_id: UUID | None = None,
+    force: bool = False,
 ) -> EtlRun:
     """Executa a sequência de rotinas com advisory lock e histórico."""
     engine = get_write_engine()
@@ -222,7 +224,12 @@ def run_pipeline(  # noqa: C901, PLR0912, PLR0915
 
             try:
                 # Executa a função da rotina
-                stats = fn(session, lattes_ids=lattes_ids)
+                routine_kwargs: dict[str, object] = {
+                    'lattes_ids': lattes_ids,
+                }
+                if force and 'force' in inspect.signature(fn).parameters:
+                    routine_kwargs['force'] = True
+                stats = fn(session, **routine_kwargs)
                 duration_ms = int((time.perf_counter() - step_start) * 1000)
 
                 etl_run.steps = {
