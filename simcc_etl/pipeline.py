@@ -43,6 +43,7 @@ from simcc_etl.routines import (
     remove_researchers,
     resolve_cnpq_lattes_id,
     sanitize_lattes_data,
+    seed_geo_reference,
     soap_lattes,
 )
 
@@ -65,6 +66,7 @@ ROUTINES: dict[str, Callable[..., Stats]] = {
     'hop_index': extract_lattes_hop.run_index,
     'sanitize_lattes_data': sanitize_lattes_data.run,
     'remove_researchers': remove_researchers.run,
+    'seed_geo_reference': seed_geo_reference.run,
     'enrich_researcher_institution': enrich_researcher_institution.run,
     'aggregate_researcher_production': aggregate_researcher_production.run,
     'calculate_researcher_indprod': (
@@ -102,6 +104,7 @@ DEFAULT_ROUTINES: list[str] = [
     'import_capes_researchers',
     'sanitize_lattes_data',
     'remove_researchers',
+    'seed_geo_reference',
     'enrich_researcher_institution',
     'aggregate_researcher_production',
     'export_oda_research_groups',
