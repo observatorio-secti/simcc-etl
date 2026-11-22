@@ -231,6 +231,15 @@ ROUTINE_METADATA: dict[str, RoutineMetadata] = {
         ),
         'category': RoutineCategory.PROCESSING,
     },
+    'seed_geo_reference': {
+        'id': 'seed_geo_reference',
+        'title': 'Referência geográfica',
+        'description': (
+            'Atualiza territórios de identidade e municípios do IBGE e '
+            'preenche o código IBGE das cidades.'
+        ),
+        'category': RoutineCategory.CONSOLIDATION,
+    },
     'enrich_researcher_institution': {
         'id': 'enrich_researcher_institution',
         'title': 'Vincular instituições',
