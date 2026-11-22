@@ -1,6 +1,25 @@
+from unittest.mock import MagicMock
+
 from simcc_etl.routines.import_capes_programs import (
+    get_institutions_mapping,
     process_program_row,
 )
+
+
+def test_get_institutions_mapping_requires_acronym():
+    session = MagicMock()
+    session.execute.return_value.mappings.return_value.all.return_value = [
+        {'id': 'inst-1', 'name': 'Universidade Estadual de Feira de Santana'},
+    ]
+
+    result = get_institutions_mapping(session)
+
+    sql_arg = str(session.execute.call_args[0][0])
+    assert 'acronym IS NOT NULL' in sql_arg
+    assert "TRIM(acronym) <> ''" in sql_arg
+    assert result == {
+        'universidade estadual de feira de santana': 'inst-1',
+    }
 
 
 def test_process_program_row_ignored_situacao():

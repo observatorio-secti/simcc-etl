@@ -24,7 +24,9 @@ LOCATION_PARTS = 2
 
 def get_institutions_mapping(session: Session) -> dict[str, str]:
     sql = text(
-        'SELECT id::TEXT, name FROM public.institution WHERE name IS NOT NULL'
+        'SELECT id::TEXT, name FROM public.institution '
+        'WHERE name IS NOT NULL '
+        "AND acronym IS NOT NULL AND TRIM(acronym) <> ''"
     )
     result = session.execute(sql).mappings().all()
     return {normalize_text(row['name']): str(row['id']) for row in result}
