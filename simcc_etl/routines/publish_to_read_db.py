@@ -40,6 +40,7 @@ EXCLUDED_TABLES = {
     'alembic_version_etl',
     'etl_runs',
     'consistency_reports',
+    'mv_refresh_metadata',
 }
 
 REDIS_GENERATION_KEY = 'simcc:v2:search:generation'
@@ -383,9 +384,10 @@ def _copy_table(w_conn, r_conn, table: str, columns: list[str]) -> None:
             inp.write(data)
 
 
-def _build_staging(w_conn, r_conn, cat: ReadCatalog) -> None:
+def _build_staging(w_conn, r_conn, cat: ReadCatalog) -> dict[str, int]:
     staging = sql.Identifier(STAGING_SCHEMA)
     table_names = set(cat.tables)
+    mv_durations_ms: dict[str, int] = {}
 
     def rel(name: str) -> sql.Composed:
         return sql.SQL('{}.{}').format(staging, sql.Identifier(name))
@@ -449,11 +451,13 @@ def _build_staging(w_conn, r_conn, cat: ReadCatalog) -> None:
         )
         for mv in mview_creation_order(cat.mviews, cat.mview_deps):
             logger.debug(f'Criando MV {mv}')
+            t0 = time.perf_counter()
             cur.execute(
                 sql.SQL('CREATE MATERIALIZED VIEW {} AS {} WITH DATA').format(
                     rel(mv), sql.SQL(cat.mviews[mv])
                 )
             )
+            mv_durations_ms[mv] = int((time.perf_counter() - t0) * 1000)
         for relation, indexdef in cat.indexes:
             if relation in cat.mviews:
                 cur.execute(retarget_index_def(indexdef, STAGING_SCHEMA))
@@ -496,6 +500,8 @@ def _build_staging(w_conn, r_conn, cat: ReadCatalog) -> None:
         logger.info('Atualizando estatísticas do staging (ANALYZE)')
         for relation in [*cat.tables, *cat.mviews]:
             cur.execute(sql.SQL('ANALYZE {}').format(rel(relation)))
+
+    return mv_durations_ms
 
 
 def _swap(r_conn, cat: ReadCatalog) -> None:
@@ -568,6 +574,33 @@ def _drop_staging(r_conn) -> None:
         logger.warning(f'Não foi possível remover o staging: {e}')
 
 
+_UPSERT_MV_REFRESH_METADATA_SQL = """
+    INSERT INTO public.mv_refresh_metadata (view_name, refreshed_at, duration_ms)
+    VALUES (%s, now(), %s)
+    ON CONFLICT (view_name) DO UPDATE
+    SET refreshed_at = EXCLUDED.refreshed_at,
+        duration_ms = EXCLUDED.duration_ms
+"""
+
+
+def _record_mv_refresh_metadata(cur, durations_ms: dict[str, int]) -> None:
+    """Registra o momento e a duração do refresh em mv_refresh_metadata."""
+    if not durations_ms:
+        return
+    cur.execute(
+        "SELECT to_regclass('public.mv_refresh_metadata') IS NOT NULL"
+    )
+    row = cur.fetchone()
+    if not row or not row[0]:
+        logger.debug(
+            'Tabela public.mv_refresh_metadata ausente; '
+            'pulando registro de metadados'
+        )
+        return
+    for view_name, duration_ms in durations_ms.items():
+        cur.execute(_UPSERT_MV_REFRESH_METADATA_SQL, (view_name, duration_ms))
+
+
 def publish_via_staging(write_dsn: str, read_dsn: str) -> PublishResult:
     """Copia o write_db para o staging do read_db e troca com public."""
     with (
@@ -592,13 +625,15 @@ def publish_via_staging(write_dsn: str, read_dsn: str) -> PublishResult:
                 + ', '.join(f'{k} {n} em {r}' for k, r, n in cat.unsupported)
             )
 
-        _build_staging(w_conn, r_conn, cat)
+        mv_durations_ms = _build_staging(w_conn, r_conn, cat)
         logger.info('Staging pronto; trocando com public')
         try:
             _swap(r_conn, cat)
         except Exception:
             _drop_staging(r_conn)
             raise
+        with r_conn.transaction(), r_conn.cursor() as cur:
+            _record_mv_refresh_metadata(cur, mv_durations_ms)
         return PublishResult(tables=len(cat.tables), mviews=len(cat.mviews))
 
 
@@ -614,6 +649,7 @@ def refresh_materialized_views(read_dsn: str) -> int:
 
         for mv in mview_creation_order(mviews, deps):
             ident = sql.SQL('public.{}').format(sql.Identifier(mv))
+            t0 = time.perf_counter()
             try:
                 refresh = sql.SQL('REFRESH MATERIALIZED VIEW CONCURRENTLY {}')
                 cur.execute(refresh.format(ident))
@@ -625,6 +661,8 @@ def refresh_materialized_views(read_dsn: str) -> int:
                 cur.execute(
                     sql.SQL('REFRESH MATERIALIZED VIEW {}').format(ident)
                 )
+            duration_ms = int((time.perf_counter() - t0) * 1000)
+            _record_mv_refresh_metadata(cur, {mv: duration_ms})
         return len(mviews)
 
 

@@ -18,6 +18,22 @@ def test_export_oda_research_groups_is_non_blocking():
     assert 'export_oda_research_groups' in pipeline.NON_BLOCKING_ROUTINES
 
 
+def test_routine_catalog_covers_all_non_alias_routines():
+    catalog = pipeline.get_routine_catalog()
+    catalog_ids = [item['id'] for item in catalog]
+    expected_ids = [
+        name for name in pipeline.ROUTINES if name not in pipeline.ROUTINE_ALIASES
+    ]
+    assert catalog_ids == expected_ids
+    for alias in pipeline.ROUTINE_ALIASES:
+        assert alias in pipeline.ROUTINES
+        assert alias not in catalog_ids
+    for item in catalog:
+        assert item['title']
+        assert item['description']
+        assert isinstance(item['category'], pipeline.RoutineCategory)
+
+
 def test_run_pipeline_continues_when_non_blocking_routine_fails(monkeypatch):
     engine, lock_conn, session = _make_mock_engine_and_session()
     executed: list[str] = []

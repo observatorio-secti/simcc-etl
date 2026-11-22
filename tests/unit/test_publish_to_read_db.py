@@ -3,10 +3,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from simcc_etl.routines.publish_to_read_db import (
+    EXCLUDED_TABLES,
     PublishResult,
+    _record_mv_refresh_metadata,
     bump_redis_cache,
     compare_schemas,
     mview_creation_order,
+    refresh_materialized_views,
     retarget_fk_def,
     retarget_index_def,
     run,
@@ -139,3 +142,61 @@ def test_run_same_database_only_refreshes(monkeypatch):
 
     mock_publish.assert_not_called()
     assert stats.succeeded == 15
+
+
+def test_mv_refresh_metadata_is_excluded_from_schema_comparison():
+    assert 'mv_refresh_metadata' in EXCLUDED_TABLES
+    write = {'researcher': [('id', 'uuid')]}
+    read = {
+        'researcher': [('id', 'uuid')],
+        'mv_refresh_metadata': [('view_name', 'text')],
+    }
+    assert compare_schemas(write, read) == []
+
+
+def test_record_mv_refresh_metadata_skips_when_table_missing():
+    cur = MagicMock()
+    cur.fetchone.return_value = (False,)
+
+    _record_mv_refresh_metadata(cur, {'mv_a': 120})
+
+    cur.execute.assert_called_once()
+
+
+def test_record_mv_refresh_metadata_upserts_when_table_exists():
+    cur = MagicMock()
+    cur.fetchone.return_value = (True,)
+
+    _record_mv_refresh_metadata(cur, {'mv_a': 120, 'mv_b': 45})
+
+    assert cur.execute.call_count == 3
+    params = [c.args[1] for c in cur.execute.call_args_list[1:]]
+    assert params == [('mv_a', 120), ('mv_b', 45)]
+
+
+def test_refresh_materialized_views_records_metadata():
+    cur = MagicMock()
+    cur.fetchall.side_effect = [
+        [('mv_a', 'SELECT 1'), ('mv_b', 'SELECT 2')],
+        [],
+    ]
+    cur.fetchone.return_value = (True,)
+    conn = MagicMock()
+    conn.__enter__.return_value = conn
+    conn.cursor.return_value.__enter__.return_value = cur
+
+    with patch(
+        'simcc_etl.routines.publish_to_read_db._connect',
+        return_value=conn,
+    ):
+        count = refresh_materialized_views('postgresql://u@r:5432/read')
+
+    assert count == 2
+    insert_calls = [
+        c
+        for c in cur.execute.call_args_list
+        if isinstance(c.args[0], str)
+        and 'INSERT INTO public.mv_refresh_metadata' in c.args[0]
+    ]
+    assert len(insert_calls) == 2
+    assert {c.args[1][0] for c in insert_calls} == {'mv_a', 'mv_b'}
