@@ -16,7 +16,7 @@ from fastapi import (
     status,
 )
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from simcc_etl.core.database import EtlRun, get_write_session
@@ -77,6 +77,32 @@ class RunDetailResponse(BaseModel):
     error_message: str | None
 
 
+class RunPagination(BaseModel):
+    page: int
+    per_page: int
+    total_items: int
+    total_pages: int
+    has_next: bool
+    has_prev: bool
+
+    @classmethod
+    def create(cls, page: int, per_page: int, total_items: int) -> 'RunPagination':
+        total_pages = (total_items + per_page - 1) // per_page if per_page > 0 else 0
+        return cls(
+            page=page,
+            per_page=per_page,
+            total_items=total_items,
+            total_pages=total_pages,
+            has_next=page < total_pages,
+            has_prev=page > 1,
+        )
+
+
+class RunListResponse(BaseModel):
+    data: list[RunDetailResponse]
+    pagination: RunPagination
+
+
 class RunLogsResponse(BaseModel):
     lines: list[dict[str, Any]]
     next_offset: int
@@ -126,31 +152,51 @@ def trigger_run(
 
 @router.get(
     '/runs',
-    response_model=list[RunDetailResponse],
+    response_model=RunListResponse,
     dependencies=[Depends(verify_api_key)],
 )
 def list_runs(
     session: DbSession,
-    limit: Annotated[int, Query(ge=1, le=100)] = 20,
-) -> list[RunDetailResponse]:
-    """Lista o histórico recente de execuções."""
-    stmt = select(EtlRun).order_by(EtlRun.started_at.desc()).limit(limit)
+    page: Annotated[int, Query(ge=1)] = 1,
+    per_page: Annotated[int, Query(ge=1, le=100)] = 20,
+    run_status: Annotated[str | None, Query(alias='status')] = None,
+) -> RunListResponse:
+    """Lista o histórico paginado de execuções."""
+    stmt = select(EtlRun)
+    count_stmt = select(func.count()).select_from(EtlRun)
+
+    if run_status:
+        normalized_status = run_status.strip().upper()
+        stmt = stmt.where(EtlRun.status == normalized_status)
+        count_stmt = count_stmt.where(EtlRun.status == normalized_status)
+
+    total_items = session.scalar(count_stmt) or 0
+    offset = (page - 1) * per_page
+    stmt = stmt.order_by(EtlRun.started_at.desc()).offset(offset).limit(per_page)
     runs = session.scalars(stmt).all()
-    return [
-        RunDetailResponse(
-            id=r.id,
-            status=r.status,
-            started_at=r.started_at,
-            ended_at=r.ended_at,
-            triggered_by=r.triggered_by,
-            current_routine=r.current_routine,
-            routines=r.routines or [],
-            lattes_ids=r.lattes_ids,
-            steps=r.steps or {},
-            error_message=r.error_message,
-        )
-        for r in runs
-    ]
+
+    return RunListResponse(
+        data=[
+            RunDetailResponse(
+                id=r.id,
+                status=r.status,
+                started_at=r.started_at,
+                ended_at=r.ended_at,
+                triggered_by=r.triggered_by,
+                current_routine=r.current_routine,
+                routines=r.routines or [],
+                lattes_ids=r.lattes_ids,
+                steps=r.steps or {},
+                error_message=r.error_message,
+            )
+            for r in runs
+        ],
+        pagination=RunPagination.create(
+            page=page,
+            per_page=per_page,
+            total_items=total_items,
+        ),
+    )
 
 
 @router.get(
