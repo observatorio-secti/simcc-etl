@@ -1,4 +1,5 @@
 import ast
+import json
 from datetime import date, datetime
 from typing import Any
 
@@ -29,24 +30,39 @@ def get_institutions_mapping(session: Session) -> dict[str, str]:
     return {normalize_text(row['name']): str(row['id']) for row in result}
 
 
+def _parse_courses_list(cursos_raw: Any) -> list[dict[str, Any]]:
+    if isinstance(cursos_raw, list):
+        return cursos_raw
+    raw_str = str(cursos_raw).strip()
+    if not raw_str:
+        return []
+    for parser in (ast.literal_eval, json.loads):
+        try:
+            parsed = parser(raw_str)
+            if isinstance(parsed, list):
+                return parsed
+        except Exception:
+            continue
+    logger.warning(f'Não foi possível interpretar cursos: {raw_str[:120]}')
+    return []
+
+
 def _parse_courses(cursos_raw: Any) -> tuple[bool, str, str]:
     visible = False
     types = []
     modality = ''
 
     if cursos_raw is not None:
-        try:
-            cursos_list = ast.literal_eval(str(cursos_raw))
-            for course in cursos_list:
-                c_norm = {normalize_text(k): v for k, v in course.items()}
-                if c_norm.get('situacao') == 'em funcionamento':
-                    visible = True
-                n_val = normalize_text(c_norm.get('nota', ''))
-                l_val = normalize_text(c_norm.get('nivel', ''))
-                modality = f'{n_val}|{l_val}'
-                types.append(c_norm.get('nivel', ''))
-        except Exception:
-            pass
+        for course in _parse_courses_list(cursos_raw):
+            if not isinstance(course, dict):
+                continue
+            c_norm = {normalize_text(k): v for k, v in course.items()}
+            if normalize_text(c_norm.get('situacao')) == 'em funcionamento':
+                visible = True
+            n_val = normalize_text(c_norm.get('nota', ''))
+            l_val = normalize_text(c_norm.get('nivel', ''))
+            modality = f'{n_val}|{l_val}'
+            types.append(str(c_norm.get('nivel', '') or ''))
 
     prog_modality = (
         'PROFISSIONAL' if 'profissional' in modality else 'ACADÊMICO'
@@ -168,8 +184,7 @@ def run_programs(
                                  EXCLUDED.state),
                 city = COALESCE(public.graduate_program.city,
                                 EXCLUDED.city),
-                visible = COALESCE(public.graduate_program.visible,
-                                   EXCLUDED.visible),
+                visible = EXCLUDED.visible,
                 site = COALESCE(public.graduate_program.site,
                                 EXCLUDED.site),
                 coordinator = COALESCE(public.graduate_program.coordinator,

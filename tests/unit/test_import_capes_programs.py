@@ -39,3 +39,40 @@ def test_process_program_row_valid():
     assert data['institution_id'] == 'uneb-uuid'
     assert data['city'] == 'Salvador'
     assert data['state'] == 'BA'
+    assert data['visible'] is True
+
+
+def test_process_program_row_courses_uppercase_and_json():
+    inst_map = {'universidade do estado da bahia': 'uneb-uuid'}
+    row = {
+        'situacao': 'EM FUNCIONAMENTO',
+        'ies_nome': 'Universidade do Estado da Bahia',
+        'ies_municipio': 'Salvador - BA',
+        'codigo': '31001017001P0',
+        'nome': 'DIFUSÃO DO CONHECIMENTO',
+        'cursos': (
+            '[{"SITUACAO": "EM FUNCIONAMENTO", "nota": "5", "nivel": "D"}]'
+        ),
+    }
+    data, err = process_program_row(row, inst_map)
+    assert err is None
+    assert data is not None
+    assert data['visible'] is True
+
+
+def test_process_program_row_courses_inactive():
+    inst_map = {'universidade do estado da bahia': 'uneb-uuid'}
+    row = {
+        'situacao': 'EM FUNCIONAMENTO',
+        'ies_nome': 'Universidade do Estado da Bahia',
+        'ies_municipio': 'Salvador - BA',
+        'codigo': '31001017001P0',
+        'nome': 'DIFUSÃO DO CONHECIMENTO',
+        'cursos': (
+            "[{'situacao': 'DESATIVADO', 'nota': '5', 'nivel': 'D'}]"
+        ),
+    }
+    data, err = process_program_row(row, inst_map)
+    assert err is None
+    assert data is not None
+    assert data['visible'] is False

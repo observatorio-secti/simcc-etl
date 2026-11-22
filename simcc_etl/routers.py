@@ -1,7 +1,6 @@
 import json
 from collections.abc import Generator
 from datetime import datetime
-from itertools import islice
 from pathlib import Path
 from typing import Annotated, Any
 from uuid import UUID, uuid4
@@ -15,15 +14,16 @@ from fastapi import (
     Query,
     status,
 )
-from pydantic import BaseModel
-from sqlalchemy import select
+from pydantic import BaseModel, Field
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from simcc_etl.core.database import EtlRun, get_write_session
 from simcc_etl.core.settings import Settings
 from simcc_etl.pipeline import (
     AlreadyRunningError,
-    get_available_routines,
+    RoutineCategory,
+    get_routine_catalog,
     run_pipeline,
 )
 
@@ -77,20 +77,68 @@ class RunDetailResponse(BaseModel):
     error_message: str | None
 
 
+class RoutineInfo(BaseModel):
+    id: str
+    title: str
+    description: str
+    category: RoutineCategory
+
+
+class RunPagination(BaseModel):
+    page: int
+    per_page: int
+    total_items: int
+    total_pages: int
+    has_next: bool
+    has_prev: bool
+
+    @classmethod
+    def create(
+        cls, page: int, per_page: int, total_items: int
+    ) -> 'RunPagination':
+        total_pages = (
+            (total_items + per_page - 1) // per_page if per_page > 0 else 0
+        )
+        return cls(
+            page=page,
+            per_page=per_page,
+            total_items=total_items,
+            total_pages=total_pages,
+            has_next=page < total_pages,
+            has_prev=page > 1,
+        )
+
+
+class RunListResponse(BaseModel):
+    data: list[RunDetailResponse]
+    pagination: RunPagination
+
+
 class RunLogsResponse(BaseModel):
-    lines: list[dict[str, Any]]
-    next_offset: int
-    status: str
+    """Resposta paginada incremental de logs de uma execução."""
+
+    lines: list[dict[str, Any]] = Field(
+        description='Eventos JSONL a partir de `offset` (máximo `limit`).'
+    )
+    next_offset: int = Field(
+        description='Próximo índice de linha a usar no polling incremental.'
+    )
+    total: int = Field(
+        description='Total de linhas presentes no arquivo de log até agora.'
+    )
+    status: str = Field(
+        description='Status atual da execução no banco (ex.: RUNNING, SUCCEEDED).'
+    )
 
 
 @router.get(
     '/routines',
-    response_model=list[str],
+    response_model=list[RoutineInfo],
     dependencies=[Depends(verify_api_key)],
 )
-def list_routines() -> list[str]:
-    """Retorna todas as rotinas disponíveis no catálogo."""
-    return get_available_routines()
+def list_routines() -> list[RoutineInfo]:
+    """Retorna o catálogo de rotinas canônicas com título, descrição e categoria."""
+    return [RoutineInfo(**item) for item in get_routine_catalog()]
 
 
 @router.post(
@@ -126,31 +174,53 @@ def trigger_run(
 
 @router.get(
     '/runs',
-    response_model=list[RunDetailResponse],
+    response_model=RunListResponse,
     dependencies=[Depends(verify_api_key)],
 )
 def list_runs(
     session: DbSession,
-    limit: Annotated[int, Query(ge=1, le=100)] = 20,
-) -> list[RunDetailResponse]:
-    """Lista o histórico recente de execuções."""
-    stmt = select(EtlRun).order_by(EtlRun.started_at.desc()).limit(limit)
+    page: Annotated[int, Query(ge=1)] = 1,
+    per_page: Annotated[int, Query(ge=1, le=100)] = 20,
+    run_status: Annotated[str | None, Query(alias='status')] = None,
+) -> RunListResponse:
+    """Lista o histórico paginado de execuções."""
+    stmt = select(EtlRun)
+    count_stmt = select(func.count()).select_from(EtlRun)
+
+    if run_status:
+        normalized_status = run_status.strip().upper()
+        stmt = stmt.where(EtlRun.status == normalized_status)
+        count_stmt = count_stmt.where(EtlRun.status == normalized_status)
+
+    total_items = session.scalar(count_stmt) or 0
+    offset = (page - 1) * per_page
+    stmt = (
+        stmt.order_by(EtlRun.started_at.desc()).offset(offset).limit(per_page)
+    )
     runs = session.scalars(stmt).all()
-    return [
-        RunDetailResponse(
-            id=r.id,
-            status=r.status,
-            started_at=r.started_at,
-            ended_at=r.ended_at,
-            triggered_by=r.triggered_by,
-            current_routine=r.current_routine,
-            routines=r.routines or [],
-            lattes_ids=r.lattes_ids,
-            steps=r.steps or {},
-            error_message=r.error_message,
-        )
-        for r in runs
-    ]
+
+    return RunListResponse(
+        data=[
+            RunDetailResponse(
+                id=r.id,
+                status=r.status,
+                started_at=r.started_at,
+                ended_at=r.ended_at,
+                triggered_by=r.triggered_by,
+                current_routine=r.current_routine,
+                routines=r.routines or [],
+                lattes_ids=r.lattes_ids,
+                steps=r.steps or {},
+                error_message=r.error_message,
+            )
+            for r in runs
+        ],
+        pagination=RunPagination.create(
+            page=page,
+            per_page=per_page,
+            total_items=total_items,
+        ),
+    )
 
 
 @router.get(
@@ -190,7 +260,17 @@ def get_run_logs(
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=1000)] = 500,
 ) -> RunLogsResponse:
-    """Retorna os logs da tentativa a partir de uma linha offset."""
+    """Retorna fatia incremental dos logs JSONL e o total acumulado de linhas.
+
+    Formato da resposta:
+    - `lines`: lista de objetos JSON (eventos structlog) no intervalo
+      `[offset, offset + limit)`.
+    - `next_offset`: próximo `offset` a enviar no polling (`offset + len(lines)`).
+    - `total`: total de linhas existentes no arquivo `{run_id}.jsonl` no
+      momento da leitura.
+    - `status`: status atual da execução (`ACCEPTED`, `RUNNING`, `SUCCEEDED`,
+      `FAILED` ou `UNKNOWN`).
+    """
     run_status = 'UNKNOWN'
     try:
         session = get_write_session()
@@ -205,11 +285,18 @@ def get_run_logs(
 
     log_path = Path(Settings().LOG_DIR) / 'runs' / f'{run_id}.jsonl'
     if not log_path.exists():
-        return RunLogsResponse(lines=[], next_offset=offset, status=run_status)
+        return RunLogsResponse(
+            lines=[], next_offset=offset, total=0, status=run_status
+        )
 
     lines: list[dict[str, Any]] = []
+    total = 0
+    end = offset + limit
     with log_path.open('r', encoding='utf-8') as f:
-        for raw_line in islice(f, offset, offset + limit):
+        for idx, raw_line in enumerate(f):
+            total = idx + 1
+            if idx < offset or idx >= end:
+                continue
             s = raw_line.strip()
             if s:
                 try:
@@ -220,5 +307,6 @@ def get_run_logs(
     return RunLogsResponse(
         lines=lines,
         next_offset=offset + len(lines),
+        total=total,
         status=run_status,
     )

@@ -14,6 +14,35 @@ logger = get_logger('simcc_etl.routines.remove_researchers')
 
 TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0)
 
+_NESTED_CLEANUP_TARGETS: tuple[tuple[str, str, str], ...] = (
+    (
+        'bibliographic_production_article',
+        'bibliographic_production_id',
+        'bibliographic_production',
+    ),
+    (
+        'bibliographic_production_book',
+        'bibliographic_production_id',
+        'bibliographic_production',
+    ),
+    (
+        'bibliographic_production_book_chapter',
+        'bibliographic_production_id',
+        'bibliographic_production',
+    ),
+    (
+        'bibliographic_production_work_in_event',
+        'bibliographic_production_id',
+        'bibliographic_production',
+    ),
+    ('process_author', 'process_id', 'process_or_technique'),
+    ('process_keyword', 'process_id', 'process_or_technique'),
+    ('process_knowledge_area', 'process_id', 'process_or_technique'),
+    ('research_project_components', 'project_id', 'research_project'),
+    ('research_project_foment', 'project_id', 'research_project'),
+    ('research_project_production', 'project_id', 'research_project'),
+)
+
 
 def _fetch_active_lattes_ids(settings: Settings) -> list[str]:
     """Obtém a lista de lattes_id ativos no simcc-admin via HTTP Parquet."""
@@ -145,6 +174,17 @@ def run(
         ),
         {'ids': target_ids},
     )
+    for child_table, fk_col, parent_table in _NESTED_CLEANUP_TARGETS:
+        session.execute(
+            text(
+                f'DELETE FROM public.{child_table} '
+                f'WHERE {fk_col} IN ('
+                f'SELECT id FROM public.{parent_table} '
+                'WHERE researcher_id::TEXT = ANY(:ids)'
+                ');'
+            ),
+            {'ids': target_ids},
+        )
     session.execute(
         text('DELETE FROM public.researcher WHERE id::TEXT = ANY(:ids);'),
         {'ids': target_ids},

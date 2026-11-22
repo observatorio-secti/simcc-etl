@@ -33,13 +33,18 @@ def test_remove_researchers_by_admin_diff(tmp_path):
 
     session = MagicMock()
     select_res = MagicMock()
-    select_res.fetchall.return_value = [('uuid-removed-1',), ('uuid-removed-2',)]
-    session.execute.side_effect = [
-        select_res,
-        MagicMock(),
-        MagicMock(),
-        MagicMock(),
+    select_res.fetchall.return_value = [
+        ('uuid-removed-1',),
+        ('uuid-removed-2',),
     ]
+    calls = 0
+
+    def _exec(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return select_res if calls == 1 else MagicMock()
+
+    session.execute.side_effect = _exec
 
     with patch('httpx.Client.get', return_value=mock_resp):
         stats = run_remove_researchers(session, settings=settings)
@@ -51,7 +56,16 @@ def test_remove_researchers_by_admin_diff(tmp_path):
     sql_calls = [str(c.args[0]) for c in session.execute.call_args_list]
     assert any('first_leader_id = NULL' in s for s in sql_calls)
     assert any('second_leader_id = NULL' in s for s in sql_calls)
-    assert any('DELETE FROM public.researcher' in s for s in sql_calls)
+    assert any(
+        'DELETE FROM public.bibliographic_production_article' in s
+        for s in sql_calls
+    )
+    assert any('DELETE FROM public.process_author' in s for s in sql_calls)
+    assert any(
+        'DELETE FROM public.research_project_components' in s
+        for s in sql_calls
+    )
+    assert sql_calls[-1].startswith('DELETE FROM public.researcher')
     session.commit.assert_called_once()
 
 
@@ -80,12 +94,14 @@ def test_remove_researchers_targeted_lattes_ids():
     session = MagicMock()
     select_res = MagicMock()
     select_res.fetchall.return_value = [('uuid-1',)]
-    session.execute.side_effect = [
-        select_res,
-        MagicMock(),
-        MagicMock(),
-        MagicMock(),
-    ]
+    calls = 0
+
+    def _exec(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return select_res if calls == 1 else MagicMock()
+
+    session.execute.side_effect = _exec
 
     stats = run_remove_researchers(
         session,
