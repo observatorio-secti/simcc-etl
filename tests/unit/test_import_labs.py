@@ -60,27 +60,48 @@ def test_prepare_lab_params_valid_and_normalizes():
     }
 
 
-def test_prepare_lab_params_skips_missing_dependencies():
+def test_prepare_lab_params_allows_missing_or_unknown_lattes():
+    researcher_map = {'0000123456789012': 'res-uuid-1'}
+    institution_map = {'UESC': 'inst-uuid-1'}
+
+    params_no_lattes = import_labs._prepare_lab_params(
+        {
+            'HashedID': 'h1',
+            'id_lattes': '',
+            'instituicao': 'UESC',
+            'nome': 'Lab Sem Lattes',
+            'tipo': 'Pesquisa',
+        },
+        researcher_map,
+        institution_map,
+    )
+    assert params_no_lattes is not None
+    assert params_no_lattes['institution_id'] == 'inst-uuid-1'
+    assert params_no_lattes['researcher_id'] is None
+
+    params_unknown_lattes = import_labs._prepare_lab_params(
+        {
+            'HashedID': 'h2',
+            'id_lattes': '999',
+            'instituicao': 'UESC',
+            'nome': 'Lab Lattes Desconhecido',
+            'tipo': 'Pesquisa',
+        },
+        researcher_map,
+        institution_map,
+    )
+    assert params_unknown_lattes is not None
+    assert params_unknown_lattes['institution_id'] == 'inst-uuid-1'
+    assert params_unknown_lattes['researcher_id'] is None
+
+
+def test_prepare_lab_params_skips_missing_required_or_institution():
     researcher_map = {'0000123456789012': 'res-uuid-1'}
     institution_map = {'UESC': 'inst-uuid-1'}
 
     assert (
         import_labs._prepare_lab_params(
             {'id_lattes': '123456789012', 'instituicao': 'UESC'},
-            researcher_map,
-            institution_map,
-        )
-        is None
-    )
-    assert (
-        import_labs._prepare_lab_params(
-            {
-                'HashedID': 'h1',
-                'id_lattes': '999',
-                'instituicao': 'UESC',
-                'nome': 'Lab',
-                'tipo': 'Pesquisa',
-            },
             researcher_map,
             institution_map,
         )
@@ -141,15 +162,15 @@ def test_save_labs_to_database_inserts_and_updates():
         {
             'HashedID': 'hash-new',
             'tipo': 'Ensino',
-            'nome': 'Lab Novo',
+            'nome': 'Lab Novo Sem Lattes',
             'instituicao': 'UESC',
-            'id_lattes': '123456789012',
+            'id_lattes': '',
         },
         {
             'HashedID': 'hash-invalid',
             'tipo': 'Ensino',
-            'nome': 'Lab Sem Pesquisador',
-            'instituicao': 'UESC',
+            'nome': 'Lab Sem Instituição',
+            'instituicao': 'DESCONHECIDA',
             'id_lattes': '0000000000000000',
         },
     ]
