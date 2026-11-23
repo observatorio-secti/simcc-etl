@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     ODA_API_URL: str = 'https://observatoriocti.secti.ba.gov.br/oda/v1'
     ODA_SYNC_INTERVAL_DAYS: int = 7
 
+    # Laboratórios (UESC / VIP)
+    LABS_API_URL: str = 'https://vip.uesc.br/list_labs_json'
+
     @property
     def xml_current_path(self) -> Path:
         return self.STORAGE_DIR / 'xml' / 'current'

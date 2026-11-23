@@ -38,6 +38,7 @@ from simcc_etl.routines import (
     export_oda_research_groups,
     extract_lattes_hop,
     import_capes_programs,
+    import_labs,
     import_program_research_lines,
     publish_to_read_db,
     remove_researchers,
@@ -86,6 +87,7 @@ ROUTINES: dict[str, Callable[..., Stats]] = {
     'enrich_from_openalex': enrich_from_openalex.run,
     'import_program_research_lines': import_program_research_lines.run,
     'export_oda_research_groups': export_oda_research_groups.run,
+    'import_labs': import_labs.run,
     'classify_article_themes': classify_article_themes.run,
     'publish_to_read_db': publish_to_read_db.run,
     'refresh_search_views': publish_to_read_db.run,
@@ -108,6 +110,7 @@ DEFAULT_ROUTINES: list[str] = [
     'enrich_researcher_institution',
     'aggregate_researcher_production',
     'export_oda_research_groups',
+    'import_labs',
     'calculate_production_index',
     'classify_researchers',
     'build_search_dictionary',
@@ -118,6 +121,7 @@ DEFAULT_ROUTINES: list[str] = [
 # Rotinas cuja falha é registrada no step, mas não interrompe o pipeline.
 NON_BLOCKING_ROUTINES: frozenset[str] = frozenset({
     'export_oda_research_groups',
+    'import_labs',
 })
 
 
