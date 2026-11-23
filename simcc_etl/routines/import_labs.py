@@ -108,13 +108,6 @@ def _prepare_lab_params(
 
     lattes_id = clean_lattes_id(lab.get('id_lattes'))
     researcher_id = researcher_map.get(lattes_id) if lattes_id else None
-    if not researcher_id:
-        logger.debug(
-            'Pesquisador não encontrado para laboratório',
-            hashed_id=hashed_id,
-            id_lattes=lab.get('id_lattes'),
-        )
-        return None
 
     inst_acronym = _clean_str(lab.get('instituicao'))
     institution_id = (

@@ -57,6 +57,9 @@ def test_remove_researchers_by_admin_diff(tmp_path):
     assert any('first_leader_id = NULL' in s for s in sql_calls)
     assert any('second_leader_id = NULL' in s for s in sql_calls)
     assert any(
+        'UPDATE public.labs SET researcher_id = NULL' in s for s in sql_calls
+    )
+    assert any(
         'DELETE FROM public.bibliographic_production_article' in s
         for s in sql_calls
     )
