@@ -1,4 +1,6 @@
+import re
 from pathlib import Path
+from typing import Any
 
 import polars as pl
 from sqlalchemy import text
@@ -10,6 +12,14 @@ from simcc_etl.core.text import normalize_text
 
 logger = get_logger('simcc_etl.routines.import_program_research_lines')
 
+SEED_CSV_PATH = Path('storage/seed/program_research_lines.csv')
+
+
+def _clean_whitespace(value: Any) -> str:
+    if value is None:
+        return ''
+    return re.sub(r'\s+', ' ', str(value)).strip()
+
 
 def run(
     session: Session,
@@ -18,12 +28,11 @@ def run(
 ) -> Stats:
     """Importa linhas de pesquisa dos programas a partir do CSV de seed."""
     logger.info('Starting import_program_research_lines routine')
-    csv_path = Path('storage/seed/program_research_lines.csv')
-    if not csv_path.exists():
-        logger.warning(f'Seed file not found: {csv_path}')
+    if not SEED_CSV_PATH.exists():
+        logger.warning(f'Seed file not found: {SEED_CSV_PATH}')
         return Stats(found=0, succeeded=0, failed=0)
 
-    df = pl.read_csv(csv_path)
+    df = pl.read_csv(SEED_CSV_PATH)
     df = df.rename({
         col: normalize_text(col).replace('\n', '') for col in df.columns
     })
@@ -39,50 +48,52 @@ def run(
         .alias('end_year'),
     )
 
-    prog_sql = text('SELECT graduate_program_id, code FROM graduate_program;')
+    prog_sql = text(
+        'SELECT graduate_program_id, code FROM public.graduate_program;'
+    )
     prog_rows = session.execute(prog_sql).mappings().all()
     code_map = {row['code']: row['graduate_program_id'] for row in prog_rows}
 
     total_rows = len(df)
-    records_to_insert = []
+    deduped: dict[tuple[Any, str], dict[str, Any]] = {}
     failed = 0
 
     for row in df.to_dicts():
         code = row.get('codigo do programa')
         prog_id = code_map.get(code)
-        if not prog_id:
+        name = _clean_whitespace(row.get('nome')).title()
+        area = _clean_whitespace(row.get('area de concentracao')).upper()
+
+        if not prog_id or not name or not area:
             failed += 1
             continue
 
-        records_to_insert.append({
+        deduped[(prog_id, name)] = {
             'graduate_program_id': prog_id,
-            'name': row.get('nome'),
-            'area': row.get('area de concentracao'),
+            'name': name,
+            'area': area,
             'start_year': row.get('start_year'),
             'end_year': row.get('end_year'),
-        })
+        }
 
-    if records_to_insert:
-        insert_sql = text("""
+    records_to_upsert = list(deduped.values())
+    if records_to_upsert:
+        upsert_sql = text("""
             INSERT INTO public.research_lines_programs
                 (graduate_program_id, name, area, start_year, end_year)
             VALUES
                 (:graduate_program_id, :name, :area, :start_year, :end_year)
-            ON CONFLICT DO NOTHING;
+            ON CONFLICT (graduate_program_id, name) DO UPDATE SET
+                area = EXCLUDED.area,
+                start_year = EXCLUDED.start_year,
+                end_year = EXCLUDED.end_year;
         """)
-        session.execute(insert_sql, records_to_insert)
-
-        format_sql = text("""
-            UPDATE research_lines_programs SET
-                name = INITCAP(name),
-                area = UPPER(area);
-        """)
-        session.execute(format_sql)
+        session.execute(upsert_sql, records_to_upsert)
         session.commit()
 
-    succeeded = len(records_to_insert)
+    succeeded = len(records_to_upsert)
     logger.info(
         f'Finished import_program_research_lines: '
-        f'{succeeded}/{total_rows} inserted'
+        f'{succeeded}/{total_rows} upserted'
     )
     return Stats(found=total_rows, succeeded=succeeded, failed=failed)
