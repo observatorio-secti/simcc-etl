@@ -174,6 +174,14 @@ def run(
         ),
         {'ids': target_ids},
     )
+    session.execute(
+        text(
+            'UPDATE public.labs '
+            'SET researcher_id = NULL '
+            'WHERE researcher_id::TEXT = ANY(:ids);'
+        ),
+        {'ids': target_ids},
+    )
     for child_table, fk_col, parent_table in _NESTED_CLEANUP_TARGETS:
         session.execute(
             text(
