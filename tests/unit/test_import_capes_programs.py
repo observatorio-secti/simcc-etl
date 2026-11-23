@@ -1,6 +1,62 @@
+from unittest.mock import MagicMock
+
 from simcc_etl.routines.import_capes_programs import (
+    get_institutions_mapping,
     process_program_row,
 )
+
+
+def test_get_institutions_mapping_requires_acronym():
+    session = MagicMock()
+    session.execute.return_value.mappings.return_value.all.return_value = [
+        {
+            'id': 'inst-1',
+            'name': 'Universidade Estadual de Feira de Santana',
+            'acronym': 'UEFS',
+        },
+        {
+            'id': 'inst-2',
+            'name': (
+                'PONTIFÍCIA UNIVERSIDADE CATÓLICA DE MINAS GERAIS (PUC Minas)'
+            ),
+            'acronym': 'PUC Minas',
+        },
+        {
+            'id': 'inst-3',
+            'name': (
+                'INSTITUTO FEDERAL DE EDUCAÇÃO, '
+                'CIÊNCIA E TECNOLOGIA DA BAHIA (IFBA)'
+            ),
+            'acronym': 'IFBA',
+        },
+    ]
+
+    result = get_institutions_mapping(session)
+
+    sql_arg = str(session.execute.call_args[0][0])
+    assert 'acronym IS NOT NULL' in sql_arg
+    assert "TRIM(acronym) <> ''" in sql_arg
+    assert result['universidade estadual de feira de santana'] == 'inst-1'
+    assert (
+        result['pontificia universidade catolica de minas gerais'] == 'inst-2'
+    )
+    assert (
+        result['pontificia universidade catolica de minas gerais (puc minas)']
+        == 'inst-2'
+    )
+    assert (
+        result[
+            'instituto federal de educacao, ciencia e tecnologia da bahia'
+        ]
+        == 'inst-3'
+    )
+    assert (
+        result[
+            'instituto federal de educacao, '
+            'ciencia e tecnologia da bahia (ifba)'
+        ]
+        == 'inst-3'
+    )
 
 
 def test_process_program_row_ignored_situacao():

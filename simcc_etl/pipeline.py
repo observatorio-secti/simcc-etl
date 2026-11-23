@@ -339,6 +339,15 @@ ROUTINE_METADATA: dict[str, RoutineMetadata] = {
         ),
         'category': RoutineCategory.COLLECTION,
     },
+    'import_labs': {
+        'id': 'import_labs',
+        'title': 'Importar laboratórios',
+        'description': (
+            'Importa laboratórios e os associa às instituições, com ou sem '
+            'pesquisador responsável.'
+        ),
+        'category': RoutineCategory.INTEGRATION,
+    },
     'export_oda_research_groups': {
         'id': 'export_oda_research_groups',
         'title': 'Exportar grupos para o ODA',

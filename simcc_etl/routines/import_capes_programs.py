@@ -1,5 +1,6 @@
 import ast
 import json
+import re
 from datetime import date, datetime
 from typing import Any
 
@@ -24,10 +25,27 @@ LOCATION_PARTS = 2
 
 def get_institutions_mapping(session: Session) -> dict[str, str]:
     sql = text(
-        'SELECT id::TEXT, name FROM public.institution WHERE name IS NOT NULL'
+        'SELECT id::TEXT, name, acronym FROM public.institution '
+        'WHERE name IS NOT NULL '
+        "AND acronym IS NOT NULL AND TRIM(acronym) <> ''"
     )
     result = session.execute(sql).mappings().all()
-    return {normalize_text(row['name']): str(row['id']) for row in result}
+    mapping: dict[str, str] = {}
+    for row in result:
+        inst_id = str(row['id'])
+        norm_name = normalize_text(row['name'])
+        norm_acronym = normalize_text(row['acronym'])
+        mapping[norm_name] = inst_id
+        if norm_acronym:
+            stripped = re.sub(
+                rf'\(\s*{re.escape(norm_acronym)}\s*\)',
+                '',
+                norm_name,
+            )
+            name_without_acronym = re.sub(r'\s+', ' ', stripped).strip()
+            if name_without_acronym and name_without_acronym != norm_name:
+                mapping.setdefault(name_without_acronym, inst_id)
+    return mapping
 
 
 def _parse_courses_list(cursos_raw: Any) -> list[dict[str, Any]]:
