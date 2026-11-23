@@ -219,7 +219,7 @@ def test_run_fetches_and_filters_by_lattes_ids():
     assert saved_labs[0]['HashedID'] == 'h1'
 
 
-def test_run_raises_on_http_error():
+def test_run_raises_on_http_error_without_fallback(tmp_path):
     api_url = 'https://vip.uesc.br/list_labs_json'
     req = httpx.Request('GET', api_url)
     resp = httpx.Response(503, request=req)
@@ -239,5 +239,40 @@ def test_run_raises_on_http_error():
         ),
     ):
         mock_settings.return_value.LABS_API_URL = api_url
+        mock_settings.return_value.seed_dir = tmp_path
         with pytest.raises(httpx.HTTPStatusError):
             import_labs.run(session)
+
+
+def test_run_falls_back_to_seed_file_on_http_error(tmp_path):
+    api_url = 'https://vip.uesc.br/list_labs_json'
+    req = httpx.Request('GET', api_url)
+    mock_client = MagicMock()
+    mock_client.__enter__.return_value.get.side_effect = httpx.ConnectTimeout(
+        'timed out', request=req
+    )
+
+    seed_file = tmp_path / 'labs.json'
+    seed_file.write_text(
+        '[{"HashedID": "h-local", "id_lattes": ""}]', encoding='utf-8'
+    )
+
+    session = MagicMock()
+    with (
+        patch('simcc_etl.routines.import_labs.Settings') as mock_settings,
+        patch(
+            'simcc_etl.routines.import_labs.httpx.Client',
+            return_value=mock_client,
+        ),
+        patch(
+            'simcc_etl.routines.import_labs._save_labs_to_database',
+            return_value=(1, 0),
+        ) as save_mock,
+    ):
+        mock_settings.return_value.LABS_API_URL = api_url
+        mock_settings.return_value.seed_dir = tmp_path
+        stats = import_labs.run(session)
+
+    assert stats == Stats(found=1, succeeded=1, failed=0)
+    saved_labs = save_mock.call_args.args[1]
+    assert saved_labs[0]['HashedID'] == 'h-local'

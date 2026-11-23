@@ -1,4 +1,6 @@
+import json
 import re
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -35,6 +37,48 @@ def _fetch_labs(url: str) -> list[dict[str, Any]]:
             'Resposta inválida da API de laboratórios: esperado lista JSON.'
         )
     return data
+
+
+def _load_labs_from_file(seed_path: Path) -> list[dict[str, Any]]:
+    """Lê a lista de laboratórios de um arquivo JSON local."""
+    data = json.loads(seed_path.read_text(encoding='utf-8'))
+    if not isinstance(data, list):
+        raise ValueError(
+            f'Arquivo inválido em {seed_path}: esperado lista JSON.'
+        )
+    return data
+
+
+def _load_labs(settings: Settings) -> list[dict[str, Any]] | None:
+    """Busca laboratórios na API e faz fallback para storage/seed/labs.json."""
+    seed_path = settings.seed_dir / 'labs.json'
+
+    if settings.LABS_API_URL:
+        try:
+            return _fetch_labs(settings.LABS_API_URL)
+        except httpx.HTTPError as exc:
+            if not seed_path.exists():
+                raise
+            logger.warning(
+                'Falha ao consultar LABS_API_URL; usando fallback local.',
+                error=str(exc),
+                seed_path=str(seed_path),
+            )
+            return _load_labs_from_file(seed_path)
+
+    if seed_path.exists():
+        logger.info(
+            'LABS_API_URL não configurada; carregando arquivo local.',
+            seed_path=str(seed_path),
+        )
+        return _load_labs_from_file(seed_path)
+
+    logger.warning(
+        'LABS_API_URL não configurada e arquivo local ausente. '
+        'Pulando rotina.',
+        seed_path=str(seed_path),
+    )
+    return None
 
 
 def _get_researcher_map(session: Session) -> dict[str, str]:
@@ -224,15 +268,13 @@ def run(
     *,
     lattes_ids: list[str] | None = None,
 ) -> Stats:
-    """Importa e atualiza laboratórios da API configurada em LABS_API_URL."""
+    """Importa laboratórios da LABS_API_URL ou fallback local labs.json."""
     logger.info('Iniciando rotina import_labs')
     settings = Settings()
 
-    if not settings.LABS_API_URL:
-        logger.warning('LABS_API_URL não configurada. Pulando rotina.')
+    labs = _load_labs(settings)
+    if labs is None:
         return Stats(found=0, succeeded=0, failed=0)
-
-    labs = _fetch_labs(settings.LABS_API_URL)
 
     if lattes_ids is not None:
         target_ids = {
