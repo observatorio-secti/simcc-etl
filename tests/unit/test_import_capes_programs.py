@@ -1,8 +1,10 @@
-from unittest.mock import MagicMock
+from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
 
 from simcc_etl.routines.import_capes_programs import (
     get_institutions_mapping,
     process_program_row,
+    run_researchers,
 )
 
 
@@ -45,9 +47,7 @@ def test_get_institutions_mapping_requires_acronym():
         == 'inst-2'
     )
     assert (
-        result[
-            'instituto federal de educacao, ciencia e tecnologia da bahia'
-        ]
+        result['instituto federal de educacao, ciencia e tecnologia da bahia']
         == 'inst-3'
     )
     assert (
@@ -124,11 +124,87 @@ def test_process_program_row_courses_inactive():
         'ies_municipio': 'Salvador - BA',
         'codigo': '31001017001P0',
         'nome': 'DIFUSÃO DO CONHECIMENTO',
-        'cursos': (
-            "[{'situacao': 'DESATIVADO', 'nota': '5', 'nivel': 'D'}]"
-        ),
+        'cursos': ("[{'situacao': 'DESATIVADO', 'nota': '5', 'nivel': 'D'}]"),
     }
     data, err = process_program_row(row, inst_map)
     assert err is None
     assert data is not None
     assert data['visible'] is False
+
+
+def test_run_researchers_inserts_only_current_year(tmp_path):
+    csv_path = tmp_path / 'program_researchers.csv'
+    csv_path.write_text(
+        'nome,id do programa,categoria\n'
+        'Maria Silva,31001017001P0,COLABORADOR\n'
+        'Maria Silva,31001017001P0,PERMANENTE\n'
+        'Joao Souza,31001017001P0,COLABORADOR\n'
+        'Desconhecido,31001017001P0,PERMANENTE\n',
+        encoding='utf-8',
+    )
+
+    res_exec = MagicMock()
+    res_exec.mappings.return_value.all.return_value = [
+        {'id': 'res-1', 'name': 'Maria Silva'},
+        {'id': 'res-2', 'name': 'Joao Souza'},
+    ]
+    prog_exec = MagicMock()
+    prog_exec.mappings.return_value.all.return_value = [
+        {'id': 'pg-1', 'code': '31001017001P0'},
+    ]
+    session = MagicMock()
+    session.execute.side_effect = [
+        res_exec,
+        prog_exec,
+        MagicMock(),
+        MagicMock(),
+    ]
+
+    settings_mock = MagicMock()
+    settings_mock.seed_dir = tmp_path
+
+    with patch(
+        'simcc_etl.routines.import_capes_programs.Settings',
+        return_value=settings_mock,
+    ):
+        stats = run_researchers(session)
+
+    expected_year = datetime.now(timezone.utc).year
+    assert stats.found == 4
+    assert stats.succeeded == 2
+    assert stats.failed == 1
+
+    insert_call = session.execute.call_args_list[-1]
+    inserted_records = insert_call.args[1]
+    assert inserted_records == [
+        {
+            'graduate_program_id': 'pg-1',
+            'researcher_id': 'res-1',
+            'year': expected_year,
+            'type_': 'PERMANENTE',
+        },
+        {
+            'graduate_program_id': 'pg-1',
+            'researcher_id': 'res-2',
+            'year': expected_year,
+            'type_': 'COLABORADOR',
+        },
+    ]
+    session.commit.assert_called_once()
+
+
+def test_run_researchers_missing_csv(tmp_path):
+    session = MagicMock()
+    settings_mock = MagicMock()
+    settings_mock.seed_dir = tmp_path
+
+    with patch(
+        'simcc_etl.routines.import_capes_programs.Settings',
+        return_value=settings_mock,
+    ):
+        stats = run_researchers(session)
+
+    assert stats.found == 0
+    assert stats.succeeded == 0
+    assert stats.failed == 0
+    session.execute.assert_not_called()

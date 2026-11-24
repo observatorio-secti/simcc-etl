@@ -1,7 +1,7 @@
 import ast
 import json
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
 
 import polars as pl
@@ -19,7 +19,6 @@ from simcc_etl.core.text import (
 
 logger = get_logger('simcc_etl.routines.import_capes_programs')
 
-TARGET_YEARS = list(range(2013, 2026))
 LOCATION_PARTS = 2
 
 
@@ -292,8 +291,8 @@ def run_researchers(
     )
     prog_map = {clean_code(p['code']): str(p['id']) for p in prog_rows}
 
-    records_to_insert = []
-    succeeded = 0
+    current_year = datetime.now(timezone.utc).year
+    records_by_key: dict[tuple[str, str], dict[str, Any]] = {}
     failed = 0
 
     for row in df.to_dicts():
@@ -312,14 +311,19 @@ def run_researchers(
             failed += 1
             continue
 
-        succeeded += 1
-        for y in TARGET_YEARS:
-            records_to_insert.append({
-                'graduate_program_id': pg_id,
-                'researcher_id': r_id,
-                'year': y,
-                'type_': categoria,
-            })
+        key = (pg_id, r_id)
+        existing = records_by_key.get(key)
+        if existing and existing['type_'] == 'PERMANENTE':
+            continue
+        records_by_key[key] = {
+            'graduate_program_id': pg_id,
+            'researcher_id': r_id,
+            'year': current_year,
+            'type_': categoria,
+        }
+
+    records_to_insert = list(records_by_key.values())
+    succeeded = len(records_to_insert)
 
     if records_to_insert:
         session.execute(
